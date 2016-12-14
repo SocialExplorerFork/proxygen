@@ -22,7 +22,7 @@ RUN apt-get update && apt-get install -yq \
     wget
 
 WORKDIR /home
-RUN git clone https://github.com/facebook/proxygen.git
+RUN git clone https://github.com/SocialExplorerFork/proxygen.git
 WORKDIR /home/proxygen/proxygen
 RUN ./deps.sh && ./reinstall.sh
 WORKDIR /home/proxygen/proxygen/httpserver/samples/echo

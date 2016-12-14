@@ -30,7 +30,7 @@ the dependencies and `proxygen`. It will also run all the tests. Then run
 whenever to rebase the dependencies, and then rebuild and reinstall `proxygen`.
 
 A note on compatibility: this project relies on system installed
-[folly](https://github.com/facebook/folly). If you rebase `proxygen` and `make` starts to fail, you likely
+[folly](https://github.com/SocialExplorerFork/folly). If you rebase `proxygen` and `make` starts to fail, you likely
 need to update to the latest version of `folly`. Running
 `./deps.sh && ./reinstall.sh` will do this for you. We are still working
 on a solution to manage depencies more predictably.

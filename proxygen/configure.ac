@@ -58,11 +58,11 @@ AC_CHECK_LIB([crypto], [MD5_Init], [], [AC_MSG_ERROR([Unable to find libcrypto])
 AC_CHECK_LIB([ssl], [SSL_library_init], [], [AC_MSG_ERROR([Unable to find libssl])])
 AC_CHECK_LIB([z], [gzread], [], [AC_MSG_ERROR([Unable to find zlib])])
 AC_CHECK_LIB([folly],[getenv],[],[AC_MSG_ERROR(
-             [Please install the folly library from https://github.com/facebook/folly])])
+             [Please install the folly library from https://github.com/SocialExplorerFork/folly])])
 AC_CHECK_LIB([wangle], [getenv], [], [AC_MSG_ERROR(
-             [Please install the wangle library from https://github.com/facebook/wangle])])
+             [Please install the wangle library from https://github.com/SocialExplorerFork/wangle])])
 AC_CHECK_HEADER([folly/Likely.h], [], [AC_MSG_ERROR(
-[Couldn't find folly, please download from https://github.com/facebook/folly]
+[Couldn't find folly, please download from https://github.com/SocialExplorerFork/folly]
 )], [])
 
 # Checks for typedefs, structures, and compiler characteristics.

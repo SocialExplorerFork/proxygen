@@ -3,7 +3,7 @@ SUBDIRS = .
 BUILT_SOURCES = googletest-release-1.8.0/googletest/src/gtest-all.cc
 
 googletest-release-1.8.0/googletest/src/gtest-all.cc:
-	wget https://github.com/google/googletest/archive/release-1.8.0.zip
+	wget https://github.com/SocialExplorerFork/googletest/archive/release-1.8.0.zip
 	unzip release-1.8.0.zip
 
 

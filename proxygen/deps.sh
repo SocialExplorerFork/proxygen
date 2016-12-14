@@ -80,7 +80,7 @@ if  ! sudo apt-get install -y libdouble-conversion-dev;
 then
   if [ ! -e double-conversion ]; then
     echo "Fetching double-conversion from git (apt-get failed)"
-    git clone https://github.com/floitsch/double-conversion.git double-conversion
+    git clone https://github.com/SocialExplorerFork/double-conversion.git double-conversion
     cd double-conversion
     cmake . -DBUILD_SHARED_LIBS=ON
     sudo make install
@@ -92,7 +92,7 @@ fi
 # Get folly
 if [ ! -e folly/folly ]; then
     echo "Cloning folly"
-    git clone https://github.com/facebook/folly
+    git clone https://github.com/SocialExplorerFork/folly
 fi
 cd folly/folly
 git fetch
@@ -113,7 +113,7 @@ cd ../..
 # Get wangle
 if [ ! -e wangle/wangle ]; then
     echo "Cloning wangle"
-    git clone https://github.com/facebook/wangle
+    git clone https://github.com/SocialExplorerFork/wangle
 fi
 cd wangle/wangle
 git fetch
@@ -132,7 +132,7 @@ cd ../..
 
 # Build proxygen
 autoreconf -ivf
-./configure
+./configure CXXFLAGS='-std=c++14' CPPFLAGS='-std=c++14'
 make -j$JOBS
 
 # Run tests
