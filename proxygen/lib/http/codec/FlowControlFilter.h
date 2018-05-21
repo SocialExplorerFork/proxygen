@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -92,7 +92,7 @@ class FlowControlFilter:
   size_t generateBody(folly::IOBufQueue& writeBuf,
                       StreamID stream,
                       std::unique_ptr<folly::IOBuf> chain,
-                      boost::optional<uint8_t> padding,
+                      folly::Optional<uint8_t> padding,
                       bool eom) override;
 
   size_t generateWindowUpdate(folly::IOBufQueue& writeBuf,

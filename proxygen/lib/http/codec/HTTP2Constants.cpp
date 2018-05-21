@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -31,6 +31,7 @@ const uint32_t kFrameHeaderSize = 9;
 
 const uint32_t kFrameHeadersBaseMaxSize = kFramePrioritySize + 1;
 const uint32_t kFramePrioritySize = 5;
+const uint32_t kFrameStreamIDSize = 4;
 const uint32_t kFrameRstStreamSize = 4;
 const uint32_t kFramePushPromiseSize = 4;
 const uint32_t kFramePingSize = 8;
@@ -44,6 +45,7 @@ const uint32_t kMaxFramePayloadLength = (1u << 24) - 1;
 const uint32_t kMaxStreamID = (1u << 31) - 1;
 const uint32_t kInitialWindow = (1u << 16) - 1;
 const uint32_t kMaxWindowUpdateSize = (1u << 31) - 1;
+const uint32_t kMaxHeaderTableSize = (1u << 16);
 
 const std::string kAuthority(":authority");
 const std::string kMethod(":method");
@@ -60,4 +62,5 @@ const std::string kProtocolString("h2");
 const std::string kProtocolDraftString("h2-14");
 const std::string kProtocolExperimentalString("h2-fb");
 const std::string kProtocolCleartextString("h2c");
+const std::string kProtocolSettingsHeader("HTTP2-Settings");
 }}

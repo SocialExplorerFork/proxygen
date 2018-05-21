@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -19,12 +19,15 @@ namespace proxygen {
 
 FOLLY_TLS WorkerThread* WorkerThread::currentWorker_ = nullptr;
 
-std::atomic_uint WorkerThread::objectCounter_;
-
-WorkerThread::WorkerThread(folly::EventBaseManager* eventBaseManager)
+WorkerThread::WorkerThread(
+  folly::EventBaseManager* eventBaseManager, const std::string& evbName)
     : eventBaseManager_(eventBaseManager) {
-  //eventBase_.setName(folly::to<std::string>("WorkerThread",
-  //                                          objectCounter_.fetch_add(1)));
+  // Only set the event base name if not empty.
+  // While not ideal, this preserves the previous program name inheritance
+  // behavior.
+  if (!evbName.empty()) {
+    eventBase_.setName(evbName);
+  }
 }
 
 WorkerThread::~WorkerThread() {

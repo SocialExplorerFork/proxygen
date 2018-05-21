@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -10,7 +10,7 @@
 #pragma once
 
 #include <bitset>
-#include <boost/optional/optional.hpp>
+#include <folly/Optional.h>
 #include <deque>
 #include <proxygen/lib/http/HTTPHeaders.h>
 #include <proxygen/lib/http/codec/HTTPCodec.h>
@@ -35,6 +35,8 @@ namespace proxygen {
  */
 class SPDYCodec: public HTTPParallelCodec {
 public:
+  static const StreamID NoStream = 0;
+
   explicit SPDYCodec(TransportDirection direction,
                      SPDYVersion version,
                      int spdyCompressionLevel = Z_NO_COMPRESSION);
@@ -44,6 +46,7 @@ public:
 
   // HTTPCodec API
   CodecProtocol getProtocol() const override;
+  const std::string& getUserAgent() const override;
   bool supportsStreamFlowControl() const override;
   bool supportsSessionFlowControl() const override;
   size_t onIngress(const folly::IOBuf& buf) override;
@@ -51,13 +54,18 @@ public:
   void generateHeader(folly::IOBufQueue& writeBuf,
                       StreamID stream,
                       const HTTPMessage& msg,
-                      StreamID assocStream = 0,
                       bool eom = false,
                       HTTPHeaderSize* size = nullptr) override;
+  void generatePushPromise(folly::IOBufQueue& writeBuf,
+                           StreamID stream,
+                           const HTTPMessage& msg,
+                           StreamID assocstream,
+                           bool eom = false,
+                           HTTPHeaderSize* size = nullptr) override;
   size_t generateBody(folly::IOBufQueue& writeBuf,
                       StreamID stream,
                       std::unique_ptr<folly::IOBuf> chain,
-                      boost::optional<uint8_t> padding,
+                      folly::Optional<uint8_t> padding,
                       bool eom) override;
   size_t generateChunkHeader(folly::IOBufQueue& writeBuf,
                              StreamID stream,
@@ -142,12 +150,12 @@ public:
     uint32_t value;
   };
 
-  typedef std::vector<SettingData> SettingList;
+  using SettingList = std::vector<SettingData>;
 
   /**
    * Returns the SPDYVersion for the given protocol string, or none otherwise.
    */
-  static boost::optional<SPDYVersion> getVersion(const std::string& protocol);
+  static folly::Optional<SPDYVersion> getVersion(const std::string& protocol);
 
  private:
 
@@ -247,6 +255,9 @@ public:
                    int8_t pri,
                    const HTTPHeaderSize& size);
 
+  void deliverOnMessageBegin(StreamID streamID, StreamID assocStreamID,
+                             HTTPMessage* msg);
+
   /**
    * Generate the header for a SPDY data frame
    * @param writeBuf Buffer queue to which the control frame is written.
@@ -340,6 +351,7 @@ public:
   };
 
   std::unique_ptr<HTTPMessage> partialMsg_;
+  std::string userAgent_;
   const folly::IOBuf* currentIngressBuf_{nullptr};
 
   StreamID nextEgressPingID_;

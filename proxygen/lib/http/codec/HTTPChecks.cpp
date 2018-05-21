@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -35,7 +35,6 @@ void HTTPChecks::onHeadersComplete(StreamID stream,
 void HTTPChecks::generateHeader(folly::IOBufQueue& writeBuf,
                                 StreamID stream,
                                 const HTTPMessage& msg,
-                                StreamID assocStream,
                                 bool eom,
                                 HTTPHeaderSize* sizeOut) {
   if (msg.isRequest() && RFC2616::bodyImplied(msg.getHeaders())) {
@@ -45,7 +44,7 @@ void HTTPChecks::generateHeader(folly::IOBufQueue& writeBuf,
     // requests here too.
   }
 
-  call_->generateHeader(writeBuf, stream, msg, assocStream, eom, sizeOut);
+  call_->generateHeader(writeBuf, stream, msg, eom, sizeOut);
 }
 
 }

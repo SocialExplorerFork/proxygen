@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -9,7 +9,7 @@
  */
 #pragma once
 
-#include <boost/optional/optional.hpp>
+#include <folly/Optional.h>
 #include <folly/Range.h>
 #include <string>
 
@@ -24,7 +24,12 @@ namespace proxygen {
   x(HEAD),                 \
   x(CONNECT),              \
   x(PUT),                  \
-  x(TRACE)
+  x(TRACE),                \
+  x(PATCH),                \
+  x(SUB),                  \
+  x(PUB),                  \
+  x(UNSUB)
+
 
 #define HTTP_METHOD_ENUM(method) method
 
@@ -46,7 +51,7 @@ enum class HTTPMethod {
  * programmers probably really meant "GET" not "get". If the method is not
  * recognized, the return value will be None
  */
-extern boost::optional<HTTPMethod> stringToMethod(folly::StringPiece method);
+extern folly::Optional<HTTPMethod> stringToMethod(folly::StringPiece method);
 
 /**
  * Returns a string representation of the method. If EXTENSION_METHOD is

@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -9,7 +9,6 @@
  */
 #include <proxygen/lib/http/codec/compress/HPACKEncodeBuffer.h>
 
-#include <ctype.h>
 #include <memory>
 #include <proxygen/lib/http/codec/compress/HPACKConstants.h>
 #include <proxygen/lib/http/codec/compress/Logging.h>
@@ -24,18 +23,15 @@ namespace proxygen {
 
 HPACKEncodeBuffer::HPACKEncodeBuffer(
   uint32_t growthSize,
-  const HuffTree& huffmanTree,
   bool huffmanEnabled) :
-    growthSize_(growthSize),
     buf_(&bufQueue_, growthSize),
-    huffmanTree_(huffmanTree),
+    growthSize_(growthSize),
     huffmanEnabled_(huffmanEnabled) {
 }
 
 HPACKEncodeBuffer::HPACKEncodeBuffer(uint32_t growthSize) :
-    growthSize_(growthSize),
     buf_(&bufQueue_, growthSize),
-    huffmanTree_(huffman::reqHuffTree05()),
+    growthSize_(growthSize),
     huffmanEnabled_(false) {
 }
 
@@ -48,22 +44,38 @@ void HPACKEncodeBuffer::addHeadroom(uint32_t headroom) {
   bufQueue_.append(std::move(buf));
 }
 
+uint32_t HPACKEncodeBuffer::appendSequenceNumber(uint16_t seqn) {
+  buf_.writeBE<uint16_t>(seqn);
+  return sizeof(uint16_t);
+}
+
 void HPACKEncodeBuffer::append(uint8_t byte) {
   buf_.push(&byte, 1);
 }
 
-uint32_t HPACKEncodeBuffer::encodeInteger(uint32_t value, uint8_t prefix,
+uint32_t HPACKEncodeBuffer::encodeInteger(uint32_t value) {
+  return encodeInteger(value, 0, 8);
+}
+
+uint32_t HPACKEncodeBuffer::encodeInteger(
+  uint32_t value,
+  const HPACK::Instruction& instruction) {
+  return encodeInteger(value, instruction.code, instruction.prefixLength);
+}
+
+uint32_t HPACKEncodeBuffer::encodeInteger(uint32_t value, uint8_t instruction,
                                           uint8_t nbit) {
   CHECK(nbit > 0 && nbit <= 8);
   uint32_t count = 0;
-  uint8_t prefix_mask = HPACK::NBIT_MASKS[nbit];
-  uint8_t mask = ~prefix_mask & 0xFF;
+  uint8_t mask = HPACK::NBIT_MASKS[nbit];
+  // The instruction should not extend into mask
+  DCHECK_EQ(instruction & mask, 0);
 
   // write the first byte
-  uint8_t byte = prefix & prefix_mask;
+  uint8_t byte = instruction;
   if (value < mask) {
     // fits in the first byte
-    byte = byte | (mask & value);
+    byte |= value;
     append(byte);
     return 1;
   }
@@ -85,24 +97,48 @@ uint32_t HPACKEncodeBuffer::encodeInteger(uint32_t value, uint8_t prefix,
   return count;
 }
 
-uint32_t HPACKEncodeBuffer::encodeHuffman(const std::string& literal) {
-  uint32_t size = huffmanTree_.getEncodeSize(literal);
+uint32_t HPACKEncodeBuffer::encodeHuffman(folly::StringPiece literal) {
+  return encodeHuffman(0, 7, literal);
+}
+
+/*
+ * Huffman encode the literal and serialize, with an optional leading
+ * instruction.  The instruction can be at most 8 - 1 - nbit bits long.  nbit
+ * bits of the first byte will contain the prefix of the encoded literal's
+ * length.  For HPACK instruction/nbit should always be 0/7.
+ *
+ * The encoded output looks like this
+ *
+ * | instruction | 1 | Length... | Huffman Coded Literal |
+ */
+uint32_t HPACKEncodeBuffer::encodeHuffman(uint8_t instruction, uint8_t nbit,
+                                          folly::StringPiece literal) {
+  static const auto& huffmanTree = huffman::huffTree();
+  uint32_t size = huffmanTree.getEncodeSize(literal);
   // add the length
-  uint32_t count = encodeInteger(size, HPACK::LiteralEncoding::HUFFMAN, 7);
+  DCHECK_LE(nbit, 7);
+  uint8_t huffmanOn = uint8_t(1 << nbit);
+  DCHECK_EQ(instruction & huffmanOn, 0);
+  uint32_t count = encodeInteger(size, instruction | huffmanOn, nbit);
   // ensure we have enough bytes before performing the encoding
-  count += huffmanTree_.encode(literal, buf_);
+  count += huffmanTree.encode(literal, buf_);
   return count;
 }
 
-uint32_t HPACKEncodeBuffer::encodeLiteral(const std::string& literal) {
+uint32_t HPACKEncodeBuffer::encodeLiteral(folly::StringPiece literal) {
+  return encodeLiteral(0, 7, literal);
+}
+
+uint32_t HPACKEncodeBuffer::encodeLiteral(uint8_t instruction, uint8_t nbit,
+                                          folly::StringPiece literal) {
   if (huffmanEnabled_) {
-    return encodeHuffman(literal);
+    return encodeHuffman(instruction, nbit, literal);
   }
   // otherwise use simple layout
   uint32_t count =
-    encodeInteger(literal.size(), HPACK::LiteralEncoding::PLAIN, 7);
+    encodeInteger(literal.size(), instruction, nbit);
   // copy the entire string
-  buf_.push((uint8_t*)literal.c_str(), literal.size());
+  buf_.push((uint8_t*)literal.data(), literal.size());
   count += literal.size();
   return count;
 }

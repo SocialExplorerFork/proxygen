@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -10,7 +10,7 @@
 #include <proxygen/lib/http/codec/test/HTTP2FramerTest.h>
 
 #include <folly/Random.h>
-#include <gtest/gtest.h>
+#include <folly/portability/GTest.h>
 #include <proxygen/lib/http/HTTPHeaderSize.h>
 #include <proxygen/lib/http/HTTPMessage.h>
 #include <proxygen/lib/http/codec/test/TestUtils.h>
@@ -54,22 +54,22 @@ class HTTP2FramerTest : public testing::Test {
     ASSERT_EQ(ret2, ErrorCode::NO_ERROR);
   }
 
-  void dataFrameTest(uint32_t dataLen, boost::optional<uint8_t> padLen) {
+  void dataFrameTest(uint32_t dataLen, folly::Optional<uint8_t> padLen) {
     auto body = makeBuf(dataLen);
     dataFrameTest(body.get(), dataLen, padLen);
   }
 
   void dataFrameTest(IOBuf* body, uint32_t dataLen,
-                     boost::optional<uint8_t> padLen) {
+                     folly::Optional<uint8_t> padLen) {
     uint32_t frameLen = uint32_t(dataLen);
     if (padLen) {
-      frameLen += 1 + padLen.get();
+      frameLen += 1 + *padLen;
     }
     if (frameLen > kMaxFramePayloadLength) {
       EXPECT_DEATH_NO_CORE(writeData(queue_, body->clone(), 1, padLen,
-                                     false), ".*");
+                                     false, true), ".*");
     } else {
-      writeData(queue_, body->clone(), 1, padLen, false);
+      writeData(queue_, body->clone(), 1, padLen, false, true);
 
       FrameHeader outHeader;
       std::unique_ptr<IOBuf> outBuf;
@@ -136,7 +136,7 @@ TEST_F(HTTP2FramerTest, BadStreamSettings) {
 
 TEST_F(HTTP2FramerTest, BadPad) {
   auto body = makeBuf(5);
-  writeData(queue_, body->clone(), 1, Padding(5), false);
+  writeData(queue_, body->clone(), 1, Padding(5), false, true);
   queue_.trimEnd(5);
   queue_.append(string("abcde"));
 
@@ -147,6 +147,41 @@ TEST_F(HTTP2FramerTest, BadPad) {
   EXPECT_EQ(parseFrameHeader(cursor, outHeader), ErrorCode::NO_ERROR);
   EXPECT_EQ(parseData(cursor, outHeader, outBuf, padding),
             ErrorCode::PROTOCOL_ERROR);
+}
+
+TEST_F(HTTP2FramerTest, NoHeadroomOptimization) {
+  queue_.move();
+  auto buf = folly::IOBuf::create(200);
+  // This should make enough headroom so we will apply the optimization:
+  auto headRoomSize = kFrameHeaderSize + kFramePrioritySize * 2 + 10;
+  buf->advance(headRoomSize);
+  buf->append(20); // make a positive length
+  writeData(queue_, std::move(buf), 1, Padding(0), false,
+            false /* reuseIOBufHeadroom */);
+  auto queueHead = queue_.front();
+  EXPECT_TRUE(queueHead->isChained());
+  // This is our original iobuf:
+  auto queueNode = queueHead->prev();
+  EXPECT_TRUE(queueNode != nullptr);
+  // And its headroom or length is untouched:
+  EXPECT_EQ(headRoomSize, queueNode->headroom());
+  EXPECT_EQ(20, queueNode->length());
+}
+
+TEST_F(HTTP2FramerTest, UseHeadroomOptimization) {
+  queue_.move();
+  auto buf = folly::IOBuf::create(200);
+  // This should make enough headroom so we will apply the optimization:
+  auto headRoomSize = kFrameHeaderSize + kFramePrioritySize * 2 + 10;
+  buf->advance(headRoomSize);
+  buf->append(20); // make a positive length
+  writeData(queue_, std::move(buf), 1, Padding(0), false,
+            true /* reuseIOBufHeadroom */);
+  // There won't be a chain, frame header is written in-place into our IOBuf:
+  auto queueNode = queue_.front();
+  EXPECT_FALSE(queueNode->isChained());
+  // And its headroom has been shrinked:
+  EXPECT_LT(queueNode->headroom(), headRoomSize);
 }
 
 TEST_F(HTTP2FramerTest, BadStreamId) {
@@ -260,7 +295,7 @@ TEST_F(HTTP2FramerTest, HeadersWithPaddingAndPriority) {
                false, false);
 
   FrameHeader header;
-  boost::optional<PriorityUpdate> priority;
+  folly::Optional<PriorityUpdate> priority;
   std::unique_ptr<IOBuf> outBuf;
   parse(&parseHeaders, header, priority, outBuf);
 
@@ -448,7 +483,7 @@ TEST_F(HTTP2FramerTest, PushPromise) {
 
 TEST_F(HTTP2FramerTest, Continuation) {
   auto body = makeBuf(800);
-  writeContinuation(queue_, 1, true, body->clone(), 2);
+  writeContinuation(queue_, 1, true, body->clone());
 
   FrameHeader header;
   std::unique_ptr<IOBuf> outBuf;
@@ -456,7 +491,32 @@ TEST_F(HTTP2FramerTest, Continuation) {
 
   ASSERT_EQ(FrameType::CONTINUATION, header.type);
   ASSERT_TRUE(END_HEADERS & header.flags);
-  ASSERT_TRUE(PADDED & header.flags);
+  ASSERT_FALSE(PADDED & header.flags);
   ASSERT_EQ(1, header.stream);
+  EXPECT_EQ(outBuf->moveToFbString(), body->moveToFbString());
+}
+
+TEST_F(HTTP2FramerTest, ExHeaders) {
+  auto body = makeBuf(500);
+  uint32_t streamID = folly::Random::rand32(10, 1024) * 2 + 1;
+  uint32_t controlStream = streamID - 2;
+  writeExHeaders(queue_, body->clone(), streamID, controlStream,
+                 {{0, true, 12}}, 200, false, false);
+
+  FrameHeader header;
+  uint32_t outControlStreamID;
+  folly::Optional<PriorityUpdate> priority;
+  std::unique_ptr<IOBuf> outBuf;
+  parse(&parseExHeaders, header, outControlStreamID, priority, outBuf);
+
+  ASSERT_EQ(FrameType::EX_HEADERS, header.type);
+  ASSERT_EQ(streamID, header.stream);
+  ASSERT_EQ(controlStream, outControlStreamID);
+  ASSERT_TRUE(PRIORITY & header.flags);
+  ASSERT_FALSE(END_STREAM & header.flags);
+  ASSERT_FALSE(END_HEADERS & header.flags);
+  ASSERT_EQ(0, priority->streamDependency);
+  ASSERT_TRUE(priority->exclusive);
+  ASSERT_EQ(12, priority->weight);
   EXPECT_EQ(outBuf->moveToFbString(), body->moveToFbString());
 }

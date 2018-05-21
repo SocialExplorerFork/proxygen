@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -9,7 +9,9 @@
  */
 #pragma once
 
+#include <folly/Function.h>
 #include <folly/SocketAddress.h>
+#include <folly/io/async/AsyncServerSocket.h>
 #include <proxygen/httpserver/Filters.h>
 #include <proxygen/httpserver/RequestHandlerFactory.h>
 #include <signal.h>
@@ -24,6 +26,18 @@ namespace proxygen {
  */
 class HTTPServerOptions {
  public:
+  /**
+   * Type of function to run inside onNewConnection() of acceptors.
+   * If the function throws, the socket will be closed immediately. Useful
+   * for validating client cert before processing the request.
+   */
+  using NewConnectionFilter =
+      folly::Function<void(const folly::AsyncTransportWrapper* /* sock */,
+                           const folly::SocketAddress* /* address */,
+                           const std::string& /* nextProtocolName */,
+                           SecureTransportType /* secureTransportType */,
+                           const wangle::TransportInfo& /* tinfo */) const>;
+
   /**
    * Number of threads to start to handle requests. Note that this excludes
    * the thread you call `HTTPServer.start()` in.
@@ -68,6 +82,11 @@ class HTTPServerOptions {
   uint32_t listenBacklog{1024};
 
   /**
+   * Enable cleartext upgrades to HTTP/2
+   */
+  bool h2cEnabled{false};
+
+  /**
    * Signals on which to shutdown the server. Mostly you will want
    * {SIGINT, SIGTERM}. Note, if you have multiple deamons running or you want
    * to have a separate signal handler, leave this empty and handle signals
@@ -89,6 +108,12 @@ class HTTPServerOptions {
   size_t receiveSessionWindowSize{65536};
 
   /**
+   * The maximum number of transactions the remote could initiate
+   * per connection on protocols that allow multiplexing.
+   */
+  uint32_t maxConcurrentIncomingStreams{100};
+
+  /**
    * Set to true to enable gzip content compression. Currently false for
    * backwards compatibility.
    */
@@ -106,6 +131,11 @@ class HTTPServerOptions {
   int contentCompressionLevel{-1};
 
   /**
+   * Enable support for pub-sub extension.
+   */
+  bool enableExHeaders{false};
+
+  /**
    * Content types to compress, all entries as lowercase
    */
   std::set<std::string> contentCompressionTypes = {
@@ -121,5 +151,37 @@ class HTTPServerOptions {
     "text/plain",
     "text/xml",
   };
+
+  /**
+   * This holds sockets already bound to addresses that the server
+   * will listen on and will be empty once the server starts.
+   */
+  std::vector<folly::AsyncServerSocket::UniquePtr> preboundSockets_;
+
+  /**
+   * Bind to existing file descriptor(s).
+   * AsyncServerSocket can handle multiple fds and they can be provided
+   * as a vector here.
+   */
+  void useExistingSocket(folly::AsyncServerSocket::UniquePtr socket) {
+    preboundSockets_.push_back(std::move(socket));
+  }
+
+  void useExistingSocket(int socketFd) {
+    useExistingSockets({socketFd});
+  }
+
+  void useExistingSockets(const std::vector<int>& socketFds) {
+    folly::AsyncServerSocket::UniquePtr socket(new folly::AsyncServerSocket);
+
+    socket->useExistingSockets(socketFds);
+    useExistingSocket(std::move(socket));
+  }
+
+  /**
+   * Invoked after a new connection is created. Drop connection if the function
+   * throws any exception.
+   */
+  NewConnectionFilter newConnectionFilter;
 };
 }

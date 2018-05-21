@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -10,6 +10,7 @@
 #include <proxygen/httpserver/RequestHandlerAdaptor.h>
 
 #include <boost/algorithm/string.hpp>
+#include <proxygen/httpserver/ExMessageHandler.h>
 #include <proxygen/httpserver/PushHandler.h>
 #include <proxygen/httpserver/RequestHandler.h>
 #include <proxygen/httpserver/ResponseBuilder.h>
@@ -66,14 +67,13 @@ void RequestHandlerAdaptor::onBody(std::unique_ptr<folly::IOBuf> c) noexcept {
   upstream_->onBody(std::move(c));
 }
 
-void RequestHandlerAdaptor::onChunkHeader(size_t length) noexcept {
-}
+void RequestHandlerAdaptor::onChunkHeader(size_t /*length*/) noexcept {}
 
 void RequestHandlerAdaptor::onChunkComplete() noexcept {
 }
 
-void RequestHandlerAdaptor::onTrailers(std::unique_ptr<HTTPHeaders> trailers)
-    noexcept {
+void RequestHandlerAdaptor::onTrailers(
+    std::unique_ptr<HTTPHeaders> /*trailers*/) noexcept {
   // XXX: Support trailers
 }
 
@@ -90,6 +90,11 @@ void RequestHandlerAdaptor::onUpgrade(UpgradeProtocol protocol) noexcept {
 void RequestHandlerAdaptor::onError(const HTTPException& error) noexcept {
   if (err_ != kErrorNone) {
     // we have already handled an error and upstream would have been deleted
+    return;
+  }
+
+  if (!txn_->canSendHeaders()) {
+    // Cannot send anything else
     return;
   }
 
@@ -129,6 +134,12 @@ void RequestHandlerAdaptor::onEgressPaused() noexcept {
 
 void RequestHandlerAdaptor::onEgressResumed() noexcept {
   upstream_->onEgressResumed();
+}
+
+void RequestHandlerAdaptor::onExTransaction(HTTPTransaction* txn) noexcept {
+  // Create handler for child EX transaction.
+  auto handler = new RequestHandlerAdaptor(upstream_->getExHandler());
+  txn->setHandler(handler);
 }
 
 void RequestHandlerAdaptor::sendHeaders(HTTPMessage& msg) noexcept {
@@ -173,11 +184,18 @@ ResponseHandler* RequestHandlerAdaptor::newPushedResponse(
   auto pushTxn = txn_->newPushedTransaction(pushHandler->getHandler());
   if (!pushTxn) {
     // Codec doesn't support push
-    return nullptr;;
+    return nullptr;
   }
   auto pushHandlerAdaptor = new RequestHandlerAdaptor(pushHandler);
   pushHandlerAdaptor->setTransaction(pushTxn);
   return pushHandlerAdaptor;
+}
+
+ResponseHandler* RequestHandlerAdaptor::newExMessage(
+    ExMessageHandler* exHandler) noexcept {
+  RequestHandlerAdaptor* handler = new RequestHandlerAdaptor(exHandler);
+  getTransaction()->newExTransaction(handler);
+  return handler;
 }
 
 const wangle::TransportInfo&

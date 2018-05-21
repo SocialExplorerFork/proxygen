@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -10,7 +10,7 @@
 #pragma once
 
 #include <bitset>
-#include <boost/optional/optional.hpp>
+#include <folly/Optional.h>
 #include <deque>
 #include <proxygen/lib/http/HTTPHeaders.h>
 #include <proxygen/lib/http/codec/HTTPCodec.h>
@@ -43,12 +43,14 @@ public:
   bool supportsParallelRequests() const override { return true; }
   bool closeOnEgressComplete() const override { return false; }
   void setCallback(Callback* callback) override { callback_ = callback; }
-  void setParserPaused(bool paused) override {}
+  void setParserPaused(bool /* paused */) override {}
   void onIngressEOF() override {}
   bool isReusable() const override;
   bool isWaitingToDrain() const override;
   StreamID getLastIncomingStreamID() const override { return lastStreamID_; }
   void enableDoubleGoawayDrain() override;
+
+  bool onIngressUpgradeMessage(const HTTPMessage& msg) override;
 
   void setNextEgressStreamId(StreamID nextEgressStreamID) {
     if (nextEgressStreamID > nextEgressStreamID_ &&
@@ -58,12 +60,25 @@ public:
     }
   }
 
+  bool isInitiatedStream(StreamID stream) const {
+    bool odd = stream & 0x01;
+    bool upstream = (transportDirection_ == TransportDirection::UPSTREAM);
+    return (odd && upstream) || (!odd && !upstream);
+  }
+
+  bool isStreamIngressEgressAllowed(StreamID stream) const {
+    bool isInitiated = isInitiatedStream(stream);
+    return (isInitiated && stream <= ingressGoawayAck_) ||
+      (!isInitiated && stream <= egressGoawayAck_);
+  }
+
 protected:
   TransportDirection transportDirection_;
   StreamID nextEgressStreamID_;
   StreamID lastStreamID_{0};
   HTTPCodec::Callback* callback_{nullptr};
   StreamID ingressGoawayAck_{std::numeric_limits<uint32_t>::max()};
+  StreamID egressGoawayAck_{std::numeric_limits<uint32_t>::max()};
   std::string goawayErrorMessage_;
 
   enum ClosingState {
@@ -73,6 +88,22 @@ protected:
     CLOSING = 3, // SPDY only
     CLOSED = 4 // HTTP2 only
   } sessionClosing_;
+
+  template<typename T, typename... Args>
+  bool deliverCallbackIfAllowed(T callbackFn, char const* cbName,
+                                StreamID stream, Args&&... args) {
+    if (isStreamIngressEgressAllowed(stream)) {
+      if (callback_) {
+        (*callback_.*callbackFn)(stream, std::forward<Args>(args)...);
+      }
+      return true;
+    } else {
+      VLOG(2) << "Suppressing " << cbName << " for stream=" <<
+        stream << " egressGoawayAck_=" << egressGoawayAck_;
+    }
+    return false;
+  }
+
 
 };
 } // proxygen

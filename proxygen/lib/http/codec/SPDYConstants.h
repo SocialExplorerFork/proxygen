@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -9,7 +9,7 @@
  */
 #pragma once
 
-#include <boost/optional/optional.hpp>
+#include <folly/Optional.h>
 #include <proxygen/lib/http/codec/ErrorCode.h>
 #include <proxygen/lib/http/codec/SettingsId.h>
 #include <string>
@@ -93,11 +93,11 @@ enum GoawayStatusCode {
 extern GoawayStatusCode errorCodeToGoaway(ErrorCode code);
 extern ResetStatusCode errorCodeToReset(ErrorCode code);
 extern ErrorCode goawayToErrorCode(spdy::GoawayStatusCode);
-extern ErrorCode rstToErrorCode(spdy::ResetStatusCode);
+extern ErrorCode rstToErrorCode(uint32_t);
 
-boost::optional<proxygen::spdy::SettingsId> httpToSpdySettingsId(
+folly::Optional<proxygen::spdy::SettingsId> httpToSpdySettingsId(
   proxygen::SettingsId id);
-boost::optional<proxygen::SettingsId> spdyToHttpSettingsId(
+folly::Optional<proxygen::SettingsId> spdyToHttpSettingsId(
   proxygen::spdy::SettingsId id);
 
 // Constants
@@ -110,6 +110,7 @@ extern const std::string kSessionProtoNameSPDY2;
 extern const std::string kSessionProtoNameSPDY3;
 
 extern const std::string httpVersion;
+
 extern const std::string kNameVersionv2;
 extern const std::string kNameVersionv3;
 extern const std::string kNameStatusv2;

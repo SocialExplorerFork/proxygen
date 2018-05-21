@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -145,7 +145,7 @@ void FlowControlFilter::onWindowUpdate(StreamID stream, uint32_t amount) {
 size_t FlowControlFilter::generateBody(folly::IOBufQueue& writeBuf,
                                        StreamID stream,
                                        std::unique_ptr<folly::IOBuf> chain,
-                                       boost::optional<uint8_t> padding,
+                                       folly::Optional<uint8_t> padding,
                                        bool eom) {
   uint8_t padLen = padding ? *padding : 0;
   bool success = sendWindow_.reserve(

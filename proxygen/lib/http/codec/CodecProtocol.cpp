@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -20,7 +20,6 @@ namespace {
 static const std::string http_1_1 = "http/1.1";
 static const std::string spdy_3 = "spdy/3";
 static const std::string spdy_3_1 = "spdy/3.1";
-static const std::string spdy_3_1_hpack = "spdy/3.1-hpack";
 static const std::string http_2 = "http/2";
 static const std::string empty = "";
 
@@ -31,8 +30,6 @@ extern CodecProtocol getCodecProtocolFromStr(folly::StringPiece protocolStr) {
     return CodecProtocol::SPDY_3;
   } else if (protocolStr == spdy_3_1) {
     return CodecProtocol::SPDY_3_1;
-  } else if (protocolStr == spdy_3_1_hpack) {
-    return CodecProtocol::SPDY_3_1_HPACK;
   } else if (protocolStr == http_2 || protocolStr == http2::kProtocolString ||
              protocolStr == http2::kProtocolCleartextString) {
     return CodecProtocol::HTTP_2;
@@ -49,7 +46,6 @@ extern const std::string& getCodecProtocolString(CodecProtocol proto) {
     case CodecProtocol::HTTP_1_1: return http_1_1;
     case CodecProtocol::SPDY_3: return spdy_3;
     case CodecProtocol::SPDY_3_1: return spdy_3_1;
-    case CodecProtocol::SPDY_3_1_HPACK: return spdy_3_1_hpack;
     case CodecProtocol::HTTP_2: return http_2;
   }
   LOG(FATAL) << "Unreachable";
@@ -60,7 +56,6 @@ extern bool isValidCodecProtocolStr(const std::string& protocolStr) {
   return protocolStr == http_1_1 ||
          protocolStr == spdy_3 ||
          protocolStr == spdy_3_1 ||
-         protocolStr == spdy_3_1_hpack ||
          protocolStr == http2::kProtocolString ||
          protocolStr == http2::kProtocolCleartextString ||
          protocolStr == http_2;
@@ -72,8 +67,7 @@ extern CodecProtocol getCodecProtocolFromStr(const std::string& protocolStr) {
 
 extern bool isSpdyCodecProtocol(CodecProtocol protocol) {
   return protocol == CodecProtocol::SPDY_3 ||
-         protocol == CodecProtocol::SPDY_3_1 ||
-         protocol == CodecProtocol::SPDY_3_1_HPACK;
+         protocol == CodecProtocol::SPDY_3_1;
 }
 
 extern bool isHTTP2CodecProtocol(CodecProtocol protocol) {
@@ -84,13 +78,13 @@ extern bool isParallelCodecProtocol(CodecProtocol protocol) {
   return isSpdyCodecProtocol(protocol) || isHTTP2CodecProtocol(protocol);
 }
 
-extern boost::optional<std::pair<CodecProtocol, std::string>>
+extern folly::Optional<std::pair<CodecProtocol, std::string>>
 checkForProtocolUpgrade(const std::string& clientUpgrade,
                         const std::string& serverUpgrade,
                         bool serverMode) {
   CodecProtocol protocol;
   if (clientUpgrade.empty() || serverUpgrade.empty()) {
-    return boost::none;
+    return folly::none;
   }
 
   // Should be a comma separated list of protocols, like NPN
@@ -116,17 +110,20 @@ checkForProtocolUpgrade(const std::string& clientUpgrade,
         continue;
       } else {
         // The server returned a protocol the client didn't ask for
-        return boost::none;
+        return folly::none;
       }
     }
     protocol = getCodecProtocolFromStr(testProtocol);
     // Non-native upgrades get returned as HTTP_1_1/<actual protocol>
     return std::make_pair(protocol, testProtocol.str());
   }
-  return boost::none;
+  return folly::none;
 }
 
-
-const boost::none_t HTTPCodec::NoPadding = boost::none;
+const folly::Optional<HTTPCodec::StreamID> HTTPCodec::NoControlStream =
+    folly::none;
+const folly::Optional<HTTPCodec::StreamID> HTTPCodec::NoStream =
+    folly::none;
+const folly::Optional<uint8_t> HTTPCodec::NoPadding = folly::none;
 
 }

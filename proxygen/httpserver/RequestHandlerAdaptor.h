@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -50,6 +50,7 @@ class RequestHandlerAdaptor
   void onError(const HTTPException& error) noexcept override;
   void onEgressPaused() noexcept override;
   void onEgressResumed() noexcept override;
+  void onExTransaction(HTTPTransaction* txn) noexcept override;
 
   // ResponseHandler
   void sendHeaders(HTTPMessage& msg) noexcept override;
@@ -63,13 +64,14 @@ class RequestHandlerAdaptor
   void resumeIngress() noexcept override;
   ResponseHandler* newPushedResponse(
     PushHandler* pushHandler) noexcept override;
+  ResponseHandler* newExMessage(ExMessageHandler* exHandler)
+    noexcept override;
   const wangle::TransportInfo& getSetupTransportInfo() const noexcept override;
   void getCurrentTransportInfo(wangle::TransportInfo* tinfo) const override;
 
   // Helper method
   void setError(ProxygenError err) noexcept;
 
-  HTTPTransaction* txn_{nullptr};
   ProxygenError err_{kErrorNone};
   bool responseStarted_{false};
 };

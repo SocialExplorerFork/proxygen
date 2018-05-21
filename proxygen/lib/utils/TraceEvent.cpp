@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -10,9 +10,9 @@
 #include <proxygen/lib/utils/TraceEvent.h>
 
 #include <atomic>
-#include <random>
 #include <sstream>
 #include <string>
+#include <folly/json.h>
 
 namespace proxygen {
 
@@ -101,6 +101,16 @@ std::string TraceEvent::toString() const {
   }
   out << "}')";
   return out.str();
+}
+
+std::string TraceEvent::MetaData::ConvVisitor<std::string>::operator()(
+    const std::vector<std::string>& operand) const {
+  // parse string vector to json string.
+  folly::dynamic data = folly::dynamic::array;
+  for (auto item : operand) {
+    data.push_back(item);
+  }
+  return folly::toJson(data);
 }
 
 std::ostream& operator << (std::ostream& out, const TraceEvent& event) {

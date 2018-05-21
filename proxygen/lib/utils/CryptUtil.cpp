@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -10,9 +10,8 @@
 #include <proxygen/lib/utils/CryptUtil.h>
 
 #include <iomanip>
-#include <openssl/bio.h>
+#include <folly/portability/OpenSSL.h>
 #include <openssl/buffer.h>
-#include <openssl/evp.h>
 #include <openssl/md5.h>
 #include <sstream>
 

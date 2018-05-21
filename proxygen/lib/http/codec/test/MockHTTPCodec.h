@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -9,7 +9,7 @@
  */
 #pragma once
 
-#include <gmock/gmock.h>
+#include <folly/portability/GMock.h>
 #include <proxygen/lib/http/codec/HTTPCodec.h>
 
 namespace proxygen {
@@ -22,6 +22,7 @@ namespace proxygen {
 class MockHTTPCodec: public HTTPCodec {
  public:
   MOCK_CONST_METHOD0(getProtocol, CodecProtocol());
+  MOCK_CONST_METHOD0(getUserAgent, const std::string&());
   MOCK_CONST_METHOD0(getTransportDirection,  TransportDirection());
   MOCK_CONST_METHOD0(supportsStreamFlowControl, bool());
   MOCK_CONST_METHOD0(supportsSessionFlowControl, bool());
@@ -37,21 +38,26 @@ class MockHTTPCodec: public HTTPCodec {
   MOCK_CONST_METHOD0(closeOnEgressComplete, bool());
   MOCK_CONST_METHOD0(supportsParallelRequests, bool());
   MOCK_CONST_METHOD0(supportsPushTransactions, bool());
-  MOCK_METHOD6(generateHeader, void(folly::IOBufQueue&,
+  MOCK_METHOD5(generateHeader, void(folly::IOBufQueue&,
                                     HTTPCodec::StreamID,
                                     const HTTPMessage&,
-                                    HTTPCodec::StreamID,
                                     bool eom,
                                     HTTPHeaderSize*));
+  MOCK_METHOD6(generatePushPromise, void(folly::IOBufQueue&,
+                                         HTTPCodec::StreamID,
+                                         const HTTPMessage&,
+                                         HTTPCodec::StreamID,
+                                         bool eom,
+                                         HTTPHeaderSize*));
   MOCK_METHOD5(generateBody, size_t(folly::IOBufQueue&,
                                     HTTPCodec::StreamID,
                                     std::shared_ptr<folly::IOBuf>,
-                                    boost::optional<uint8_t>,
+                                    folly::Optional<uint8_t>,
                                     bool));
   size_t generateBody(folly::IOBufQueue& writeBuf,
                       HTTPCodec::StreamID stream,
                       std::unique_ptr<folly::IOBuf> chain,
-                      boost::optional<uint8_t> padding,
+                      folly::Optional<uint8_t> padding,
                       bool eom) override {
     return generateBody(writeBuf,
                         stream,
@@ -108,6 +114,9 @@ class MockHTTPCodecCallback: public HTTPCodec::Callback {
   MOCK_METHOD3(onPushMessageBegin, void(HTTPCodec::StreamID,
                                         HTTPCodec::StreamID,
                                         HTTPMessage*));
+  MOCK_METHOD3(onExMessageBegin, void(HTTPCodec::StreamID,
+                                      HTTPCodec::StreamID,
+                                      HTTPMessage*));
   MOCK_METHOD2(onHeadersComplete, void(HTTPCodec::StreamID,
                                        std::shared_ptr<HTTPMessage>));
   void onHeadersComplete(HTTPCodec::StreamID stream,
@@ -139,6 +148,8 @@ class MockHTTPCodecCallback: public HTTPCodec::Callback {
             std::shared_ptr<HTTPException>(new HTTPException(exc)),
             newStream);
   }
+  MOCK_METHOD5(onFrameHeader,
+      void(uint32_t, uint8_t, uint32_t, uint8_t, uint16_t));
   MOCK_METHOD2(onAbort, void(HTTPCodec::StreamID, ErrorCode));
   MOCK_METHOD3(onGoaway,
                void(uint64_t, ErrorCode, std::shared_ptr<folly::IOBuf>));

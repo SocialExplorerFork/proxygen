@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -9,7 +9,7 @@
  */
 #pragma once
 
-#include <gmock/gmock.h>
+#include <folly/portability/GMock.h>
 #include <proxygen/lib/http/codec/test/MockHTTPCodec.h>
 #include <proxygen/lib/http/session/HTTPTransaction.h>
 
@@ -22,7 +22,10 @@ namespace proxygen {
 
 class MockHTTPTransactionTransport: public HTTPTransaction::Transport {
  public:
-  MockHTTPTransactionTransport() {}
+  MockHTTPTransactionTransport() {
+    EXPECT_CALL(*this, getCodecNonConst())
+      .WillRepeatedly(testing::ReturnRef(mockCodec_));
+  }
   GMOCK_METHOD1_(, noexcept,, pauseIngress, void(HTTPTransaction*));
   GMOCK_METHOD1_(, noexcept,, resumeIngress, void(HTTPTransaction*));
   GMOCK_METHOD1_(, noexcept,, transactionTimeout, void(HTTPTransaction*));
@@ -30,12 +33,14 @@ class MockHTTPTransactionTransport: public HTTPTransaction::Transport {
                                                  const HTTPMessage&,
                                                  HTTPHeaderSize*,
                                                  bool));
-  GMOCK_METHOD3_(, noexcept,, sendBody,
-                 size_t(HTTPTransaction*, std::shared_ptr<folly::IOBuf>, bool));
+  GMOCK_METHOD4_(, noexcept,, sendBody,
+                 size_t(HTTPTransaction*, std::shared_ptr<folly::IOBuf>,
+                   bool, bool));
 
   size_t sendBody(HTTPTransaction* txn, std::unique_ptr<folly::IOBuf> iob,
-                  bool eom) noexcept override {
-    return sendBody(txn, std::shared_ptr<folly::IOBuf>(iob.release()), eom);
+                  bool eom, bool trackLastByteFlushed) noexcept override {
+    return sendBody(txn,
+      std::shared_ptr<folly::IOBuf>(iob.release()), eom, trackLastByteFlushed);
   }
 
   GMOCK_METHOD2_(, noexcept,, sendChunkHeader, size_t(HTTPTransaction*,
@@ -59,6 +64,10 @@ class MockHTTPTransactionTransport: public HTTPTransaction::Transport {
   GMOCK_METHOD2_(, noexcept,, newPushedTransaction,
                  HTTPTransaction*(HTTPCodec::StreamID assocStreamId,
                                   HTTPTransaction::PushHandler* handler));
+  GMOCK_METHOD2_(, noexcept,, newExTransaction,
+                 HTTPTransaction*(HTTPCodec::StreamID controlStream,
+                                  HTTPTransaction::Handler* handler));
+
   const folly::SocketAddress& getLocalAddress()
     const noexcept override {
     return const_cast<MockHTTPTransactionTransport*>(this)
@@ -85,6 +94,7 @@ class MockHTTPTransactionTransport: public HTTPTransaction::Transport {
     return const_cast<MockHTTPTransactionTransport*>(this)
       ->getCodecNonConst();
   }
+  MOCK_METHOD0(drain, void());
   MOCK_CONST_METHOD0(isDraining, bool());
   MOCK_CONST_METHOD0(getSecurityProtocol, std::string());
 
@@ -95,7 +105,7 @@ class MockHTTPTransactionTransport: public HTTPTransaction::Transport {
       void(folly::AsyncTransport::ReplaySafetyCallback*));
   GMOCK_METHOD1_(, noexcept,, removeWaitingForReplaySafety,
       void(folly::AsyncTransport::ReplaySafetyCallback*));
-  MOCK_CONST_METHOD0(getNumWaitingForReplaySafety, size_t());
+  MOCK_CONST_METHOD0(needToBlockForReplaySafety, bool());
 
   GMOCK_METHOD0_(, noexcept,, getUnderlyingTransportNonConst,
       const folly::AsyncTransportWrapper*());
@@ -104,6 +114,13 @@ class MockHTTPTransactionTransport: public HTTPTransaction::Transport {
     return const_cast<MockHTTPTransactionTransport*>(this)
       ->getUnderlyingTransport();
   }
+  MOCK_METHOD1(setHTTP2PrioritiesEnabled, void(bool));
+  MOCK_CONST_METHOD0(getHTTP2PrioritiesEnabled, bool());
+
+  MOCK_METHOD1(getHTTPPriority,
+      folly::Optional<const HTTPMessage::HTTPPriority>(uint8_t level));
+
+  MockHTTPCodec mockCodec_;
 };
 
 class MockHTTPTransaction : public HTTPTransaction {
@@ -111,14 +128,16 @@ class MockHTTPTransaction : public HTTPTransaction {
   MockHTTPTransaction(TransportDirection direction,
                       HTTPCodec::StreamID id,
                       uint32_t seqNo,
-                      HTTP2PriorityQueue& egressQueue,
+                      // Must be const for gmock
+                      const HTTP2PriorityQueue& egressQueue,
                       const WheelTimerInstance& timeout,
                       HTTPSessionStats* stats = nullptr,
                       bool useFlowControl = false,
                       uint32_t receiveInitialWindowSize = 0,
                       uint32_t sendInitialWindowSize = 0,
                       http2::PriorityUpdate priority = http2::DefaultPriority) :
-      HTTPTransaction(direction, id, seqNo, mockTransport_, egressQueue,
+      HTTPTransaction(direction, id, seqNo, mockTransport_,
+                      const_cast<HTTP2PriorityQueue&>(egressQueue),
                       timeout, stats, useFlowControl,
                       receiveInitialWindowSize,
                       sendInitialWindowSize,
@@ -139,6 +158,12 @@ class MockHTTPTransaction : public HTTPTransaction {
             this->setHandlerUnmocked(handler);
         }));
 
+    // By default we expect canSendHeaders in test to return true
+    // Tests that specifically require canSendHeaders to return false need
+    // to set the behavior locally.  This is due to the fact that the mocked
+    // methods below imply internal state is not correctly tracked/managed
+    // in the context of tests
+    ON_CALL(*this, canSendHeaders()).WillByDefault(testing::Return(true));
   }
 
   MOCK_CONST_METHOD0(extraResponseExpected, bool());
@@ -149,7 +174,9 @@ class MockHTTPTransaction : public HTTPTransaction {
     HTTPTransaction::setHandler(handler);
   }
 
+  MOCK_CONST_METHOD0(canSendHeaders, bool());
   MOCK_METHOD1(sendHeaders, void(const HTTPMessage& headers));
+  MOCK_METHOD1(sendHeadersWithEOM, void(const HTTPMessage& headers));
   MOCK_METHOD1(sendBody, void(std::shared_ptr<folly::IOBuf>));
   void sendBody(std::unique_ptr<folly::IOBuf> iob) noexcept override {
     sendBody(std::shared_ptr<folly::IOBuf>(iob.release()));
@@ -188,9 +215,15 @@ class MockHTTPTransactionTransportCallback:
       public HTTPTransaction::TransportCallback {
  public:
   MockHTTPTransactionTransportCallback() {}
+  GMOCK_METHOD0_(, noexcept,, firstHeaderByteFlushed, void());
   GMOCK_METHOD0_(, noexcept,, firstByteFlushed, void());
+  GMOCK_METHOD0_(, noexcept,, trackedByteFlushed, void());
+  GMOCK_METHOD0_(, noexcept,, lastByteFlushed, void());
+  GMOCK_METHOD1_(, noexcept,, lastByteAcked, void(std::chrono::milliseconds));
   GMOCK_METHOD1_(, noexcept,, headerBytesGenerated, void(HTTPHeaderSize&));
+  GMOCK_METHOD1_(, noexcept,, headerBytesReceived, void(const HTTPHeaderSize&));
   GMOCK_METHOD1_(, noexcept,, bodyBytesGenerated, void(size_t));
+  GMOCK_METHOD1_(, noexcept,, bodyBytesReceived, void(size_t));
 };
 
 #if defined(__clang__) && __clang_major__ >= 3 && __clang_minor__ >= 6

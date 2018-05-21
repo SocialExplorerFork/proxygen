@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -9,6 +9,7 @@
  */
 #pragma once
 
+#include <folly/FBString.h>
 #include <folly/io/Cursor.h>
 #include <folly/io/IOBufQueue.h>
 #include <proxygen/lib/http/codec/compress/HPACKConstants.h>
@@ -21,7 +22,6 @@ class HPACKEncodeBuffer {
  public:
   HPACKEncodeBuffer(
     uint32_t growthSize,
-    const huffman::HuffTree& huffmanTree,
     bool huffmanEnabled);
 
   explicit HPACKEncodeBuffer(uint32_t growthSize);
@@ -45,34 +45,57 @@ class HPACKEncodeBuffer {
    */
   void addHeadroom(uint32_t bytes);
 
+  uint32_t appendSequenceNumber(uint16_t seqn);
+
   /**
-   * Encode the integer value using variable-length layout and the given prefix
-   * that spans nbit bits.
-   * The prefix is given as 1-byte value (not need for shifting) used only for
-   * the first byte. It starts from MSB.
+   * Encode the integer value using variable-length layout and the given
+   * instruction using an nbit prefix.  Per the spec, prefix is the portion
+   * of value that fits in one byte.
+   * The instruction is given as 1-byte value (not need for shifting) used only
+   * for the first byte. It starts from MSB.
    *
-   * For example for integer=3, prefix=0x80, nbit=6:
+   * For example for integer=3, instruction=0x80, nbit=6:
    *
    * MSB           LSB
    * X X 0 0 0 0 1 1 (value)
-   * 1 0 X X X X X X (prefix)
+   * 1 0 X X X X X X (instruction)
    * 1 0 0 0 0 0 1 1 (encoded value)
    *
    * @return how many bytes were used to encode the value
    */
-  uint32_t encodeInteger(uint32_t value, uint8_t prefix, uint8_t nbit);
+  uint32_t encodeInteger(uint32_t value, uint8_t instruction, uint8_t nbit);
+
+  uint32_t encodeInteger(uint32_t value, const HPACK::Instruction& instruction);
+
+  uint32_t encodeInteger(uint32_t value);
 
   /**
    * encodes a string, either header name or header value
    *
    * @return bytes used for encoding
    */
-  uint32_t encodeLiteral(const std::string& literal);
+  uint32_t encodeLiteral(folly::StringPiece literal);
+
+  /**
+   * encodes a string, either header name or header value QPACK style, where
+   * literal length has an nbit prefix.
+   *
+   * @return bytes used for encoding
+   */
+  uint32_t encodeLiteral(uint8_t instruction, uint8_t nbit,
+                         folly::StringPiece literal);
 
   /**
    * encodes a string using huffman encoding
    */
-  uint32_t encodeHuffman(const std::string& literal);
+  uint32_t encodeHuffman(folly::StringPiece literal);
+
+  /**
+   * encodes a string using huffman encoding QPACK style, where
+   * literal length has an nbit prefix.
+   */
+  uint32_t encodeHuffman(uint8_t instruction, uint8_t nbit,
+                         folly::StringPiece literal);
 
   /**
    * prints the content of an IOBuf in binary format. Useful for debugging.
@@ -86,10 +109,9 @@ class HPACKEncodeBuffer {
    */
   void append(uint8_t byte);
 
-  uint32_t growthSize_;
   folly::IOBufQueue bufQueue_;
   folly::io::QueueAppender buf_;
-  const huffman::HuffTree& huffmanTree_;
+  uint32_t growthSize_;
   bool huffmanEnabled_;
 };
 

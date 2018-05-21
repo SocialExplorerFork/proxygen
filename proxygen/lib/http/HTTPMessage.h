@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -41,8 +41,10 @@ class HTTPMessage {
 
   HTTPMessage();
   ~HTTPMessage();
+  HTTPMessage(HTTPMessage&& message) noexcept;
   HTTPMessage(const HTTPMessage& message);
   HTTPMessage& operator=(const HTTPMessage& message);
+  HTTPMessage& operator=(HTTPMessage&& message);
 
   /**
    * Is this a chunked message? (fpreq, fpresp)
@@ -59,10 +61,17 @@ class HTTPMessage {
   /**
    * Set/Get client address
    */
-  void setClientAddress(const folly::SocketAddress& addr) {
+  void setClientAddress(const folly::SocketAddress& addr,
+                        std::string ipStr = empty_string,
+                        std::string portStr = empty_string) {
     request().clientAddress_ = addr;
-    request().clientIP_ = addr.getAddressStr();
-    request().clientPort_ = folly::to<std::string>(addr.getPort());
+    if (ipStr.empty() || portStr.empty()) {
+      request().clientIP_ = addr.getAddressStr();
+      request().clientPort_ = folly::to<std::string>(addr.getPort());
+    } else {
+      request().clientIP_ = std::move(ipStr);
+      request().clientPort_ = std::move(portStr);
+    }
   }
 
   const folly::SocketAddress& getClientAddress() const {
@@ -80,10 +89,17 @@ class HTTPMessage {
   /**
    * Set/Get destination (vip) address
    */
-  void setDstAddress(const folly::SocketAddress& addr) {
+  void setDstAddress(const folly::SocketAddress& addr,
+                     std::string addressStr = empty_string,
+                     std::string portStr = empty_string) {
     dstAddress_ = addr;
-    dstIP_ = addr.getAddressStr();
-    dstPort_ = folly::to<std::string>(addr.getPort());
+    if (addressStr.empty() || portStr.empty()) {
+      dstIP_ = addr.getAddressStr();
+      dstPort_ = folly::to<std::string>(addr.getPort());
+    } else {
+      dstIP_ = std::move(addressStr);
+      dstPort_ = std::move(portStr);
+    }
   }
 
   const folly::SocketAddress& getDstAddress() const {
@@ -123,7 +139,7 @@ class HTTPMessage {
    * standard request method, or else "none" if it is an extension method
    * (fpreq)
    */
-  boost::optional<HTTPMethod> getMethod() const;
+  folly::Optional<HTTPMethod> getMethod() const;
 
   /**
    * @Returns a string representation of the request method (fpreq)
@@ -264,6 +280,16 @@ class HTTPMessage {
    * Returns true if this is a 1xx response.
    */
   bool is1xxResponse() const { return (getStatusCode() / 100) == 1; }
+
+  /**
+   * Returns true if this is a 4xx response.
+   */
+  bool is4xxResponse() const { return (getStatusCode() / 100) == 4; }
+
+  /**
+   * Returns true if this is a 5xx response.
+   */
+  bool is5xxResponse() const { return (getStatusCode() / 100) == 5; }
 
   /**
    * Formats the current time appropriately for a Date header
@@ -439,6 +465,8 @@ class HTTPMessage {
    */
   void dumpMessage(int verbosity) const;
 
+  void describe(std::ostream& os) const;
+
   /**
    * Print the message out, serializes through mutex
    * Used in shutdown path
@@ -502,13 +530,13 @@ class HTTPMessage {
 
   void setPriority(int8_t pri) {
     pri_ = normalizePriority(pri);
-    h2Pri_ = boost::none;
+    h2Pri_ = folly::none;
   }
   uint8_t getPriority() const { return pri_; }
 
-  typedef std::tuple<uint32_t, bool, uint8_t> HTTPPriority;
+  using HTTPPriority = std::tuple<uint32_t, bool, uint8_t>;
 
-  boost::optional<HTTPPriority> getHTTP2Priority()
+  folly::Optional<HTTPPriority> getHTTP2Priority()
     const {
     return h2Pri_;
   }
@@ -534,9 +562,10 @@ class HTTPMessage {
   }
 
   /**
-   * Get the time when the first byte of the message arrived
+   * Getter and setter for the time when the first byte of the message arrived
    */
   TimePoint getStartTime() const { return startTime_; }
+  void setStartTime(const TimePoint& startTime) { startTime_ = startTime; }
 
   /**
    * Check if a particular token value is present in a header that consists of
@@ -555,7 +584,7 @@ class HTTPMessage {
    * callers have to explicitly call unparseCookies() after modifying the
    * cookie headers.
    */
-  void unparseCookies();
+  void unparseCookies() const;
 
   /**
    * Get the default reason string for a status code.
@@ -630,6 +659,11 @@ class HTTPMessage {
 
   void parseQueryParams() const;
   void unparseQueryParams();
+
+  bool doHeaderTokenCheck(const HTTPHeaders& headers_,
+                          const HTTPHeaderCode headerCode,
+                          char const* token,
+                          bool caseSensitive) const;
 
   /**
    * Trims whitespace from the beggining and end of the StringPiece.
@@ -724,7 +758,7 @@ class HTTPMessage {
   const char* sslCipher_;
   const std::string* protoStr_;
   uint8_t pri_;
-  boost::optional<HTTPPriority> h2Pri_;
+  folly::Optional<HTTPPriority> h2Pri_;
 
   mutable bool parsedCookies_:1;
   mutable bool parsedQueryParams_:1;
@@ -739,6 +773,8 @@ class HTTPMessage {
   // used by atomicDumpMessage
   static std::mutex mutexDump_;
 };
+
+std::ostream& operator<<(std::ostream& os, const HTTPMessage& msg);
 
 /**
  * Returns a std::string that has the control characters removed from the

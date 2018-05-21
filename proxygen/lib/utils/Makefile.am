@@ -2,10 +2,10 @@ SUBDIRS = . test
 
 BUILT_SOURCES = TraceEventType.h TraceEventType.cpp TraceFieldType.h TraceFieldType.cpp
 
-TraceGen: TraceEventType.txt TraceFieldType.txt
+TraceGen: samples/TraceEventType.txt samples/TraceFieldType.txt
 	python gen_trace_event_constants.py \
 	--output_type=cpp \
-	--input_files=TraceEventType.txt,TraceFieldType.txt \
+	--input_files=samples/TraceEventType.txt,samples/TraceFieldType.txt \
 	--output_scope=proxygen \
 	--header_path=proxygen/lib/utils \
 	--install_dir=$(srcdir) \
@@ -26,10 +26,9 @@ noinst_LTLIBRARIES = libutils.la
 libutilsdir = $(includedir)/proxygen/lib/utils
 nobase_libutils_HEADERS = \
 	AsyncTimeoutSet.h \
-	ChromeUtils.h \
+	Base64.h \
 	CobHelper.h \
 	CryptUtil.h \
-	DestructorCheck.h \
 	Exception.h \
 	Export.h \
 	FilterChain.h \
@@ -51,14 +50,13 @@ nobase_libutils_HEADERS = \
 	Logging.h \
 	ZlibStreamCompressor.h \
 	ZlibStreamDecompressor.h \
-	WheelTimerInstance.h \
-	SharedWheelTimer.h
+	WheelTimerInstance.h
 
 # We put the generated files first so that we create them first
 libutils_la_SOURCES = \
 	../../external/http_parser/http_parser_cpp.cpp \
 	AsyncTimeoutSet.cpp \
-	ChromeUtils.cpp \
+	Base64.cpp \
 	Exception.cpp \
 	HTTPTime.cpp \
 	TraceEventContext.cpp \
@@ -71,5 +69,4 @@ libutils_la_SOURCES = \
 	CryptUtil.cpp \
 	ZlibStreamCompressor.cpp \
 	ZlibStreamDecompressor.cpp \
-	WheelTimerInstance.cpp \
-	SharedWheelTimer.cpp
+	WheelTimerInstance.cpp

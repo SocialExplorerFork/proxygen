@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -9,8 +9,7 @@
  */
 #include <proxygen/lib/utils/Time.h>
 
-#include <openssl/asn1.h>
-#include <openssl/bio.h>
+#include <folly/portability/OpenSSL.h>
 #include <openssl/ossl_typ.h>
 
 namespace proxygen {

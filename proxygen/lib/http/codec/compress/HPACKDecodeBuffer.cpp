@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -41,17 +41,23 @@ uint8_t HPACKDecodeBuffer::peek() {
   return *cursor_.data();
 }
 
-DecodeError HPACKDecodeBuffer::decodeLiteral(std::string& literal) {
+DecodeError HPACKDecodeBuffer::decodeLiteral(folly::fbstring& literal) {
+  return decodeLiteral(7, literal);
+}
+
+DecodeError HPACKDecodeBuffer::decodeLiteral(uint8_t nbit,
+                                             folly::fbstring& literal) {
   literal.clear();
   if (remainingBytes_ == 0) {
     LOG(ERROR) << "remainingBytes_ == 0";
     return DecodeError::BUFFER_UNDERFLOW;
   }
   auto byte = peek();
-  bool huffman = byte & HPACK::LiteralEncoding::HUFFMAN;
+  uint8_t huffmanCheck = uint8_t(1 << nbit);
+  bool huffman = byte & huffmanCheck;
   // extract the size
   uint32_t size;
-  DecodeError result = decodeInteger(7, size);
+  DecodeError result = decodeInteger(nbit, size);
   if (result != DecodeError::NONE) {
     LOG(ERROR) << "Could not decode literal size";
     return result;
@@ -79,12 +85,17 @@ DecodeError HPACKDecodeBuffer::decodeLiteral(std::string& literal) {
     data = tmpbuf->data();
   }
   if (huffman) {
-    huffmanTree_.decode(data, size, literal);
+    static auto& huffmanTree = huffman::huffTree();
+    huffmanTree.decode(data, size, literal);
   } else {
     literal.append((const char *)data, size);
   }
   remainingBytes_ -= size;
   return DecodeError::NONE;
+}
+
+DecodeError HPACKDecodeBuffer::decodeInteger(uint32_t& integer) {
+  return decodeInteger(8, integer);
 }
 
 DecodeError HPACKDecodeBuffer::decodeInteger(uint8_t nbit, uint32_t& integer) {
@@ -93,7 +104,7 @@ DecodeError HPACKDecodeBuffer::decodeInteger(uint8_t nbit, uint32_t& integer) {
     return DecodeError::BUFFER_UNDERFLOW;
   }
   uint8_t byte = next();
-  uint8_t mask = ~HPACK::NBIT_MASKS[nbit] & 0xFF;
+  uint8_t mask = HPACK::NBIT_MASKS[nbit];
   // remove the first (8 - nbit) bits
   byte = byte & mask;
   integer = byte;

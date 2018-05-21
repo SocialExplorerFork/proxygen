@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -40,7 +40,7 @@ namespace proxygen {
 class AsyncTimeoutSet : private folly::AsyncTimeout,
                         public folly::DelayedDestruction {
  public:
-  typedef std::unique_ptr<AsyncTimeoutSet, Destructor> UniquePtr;
+  using UniquePtr = std::unique_ptr<AsyncTimeoutSet, Destructor>;
 
   /**
    * A callback to be notified when a timeout has expired.

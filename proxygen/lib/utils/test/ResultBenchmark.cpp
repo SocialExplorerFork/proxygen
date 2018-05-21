@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -19,7 +19,7 @@ struct MediumStruct {
   int32_t field2;
 };
 
-typedef Result<MediumStruct, int> MediumResult;
+using MediumResult = Result<MediumStruct, int>;
 
 static_assert(std::is_nothrow_copy_constructible<MediumResult>::value, "");
 static_assert(sizeof(MediumStruct) == 8, "");

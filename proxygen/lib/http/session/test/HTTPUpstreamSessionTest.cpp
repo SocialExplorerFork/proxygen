@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -7,15 +7,16 @@
  *  of patent rights can be found in the PATENTS file in the same directory.
  *
  */
-#include <folly/Foreach.h>
 #include <folly/io/Cursor.h>
 #include <folly/io/async/EventBase.h>
 #include <folly/io/async/TimeoutManager.h>
-#include <gtest/gtest.h>
+#include <wangle/acceptor/ConnectionManager.h>
+#include <folly/portability/GTest.h>
 #include <proxygen/lib/http/codec/test/MockHTTPCodec.h>
 #include <proxygen/lib/http/codec/HTTPCodecFactory.h>
 #include <proxygen/lib/http/codec/test/TestUtils.h>
 #include <proxygen/lib/http/session/HTTPUpstreamSession.h>
+#include <proxygen/lib/http/session/test/MockByteEventTracker.h>
 #include <proxygen/lib/http/session/test/HTTPSessionMocks.h>
 #include <proxygen/lib/http/session/test/HTTPSessionTest.h>
 #include <proxygen/lib/http/session/test/TestUtils.h>
@@ -33,6 +34,66 @@ using namespace testing;
 using std::string;
 using std::unique_ptr;
 using std::vector;
+
+class TestPriorityMapBuilder : public HTTPUpstreamSession::PriorityMapFactory {
+public:
+  virtual std::unique_ptr<HTTPUpstreamSession::PriorityAdapter>
+     createVirtualStreams(HTTPPriorityMapFactoryProvider* session) const
+        override;
+  virtual ~TestPriorityMapBuilder() = default;
+
+  uint8_t hiPriWeight_{18};
+  uint8_t hiPriLevel_{0};
+  uint8_t loPriWeight_{2};
+  uint8_t loPriLevel_{2};
+};
+
+class TestPriorityAdapter : public HTTPUpstreamSession::PriorityAdapter {
+public:
+  virtual folly::Optional<const HTTPMessage::HTTPPriority> getHTTPPriority(
+      uint8_t level) override {
+    if (priorityMap_.empty()) {
+      return folly::none;
+    }
+    auto it = priorityMap_.find(level);
+    if (it == priorityMap_.end()) {
+      return minPriority_;
+    }
+    return it->second;
+  }
+
+  virtual ~TestPriorityAdapter() = default;
+
+  std::map<uint8_t, HTTPMessage::HTTPPriority> priorityMap_;
+  HTTPMessage::HTTPPriority minPriority_{std::make_tuple(0, false, 0)};
+  HTTPCodec::StreamID parentId_{0};
+  HTTPCodec::StreamID hiPriId_{0};
+  HTTPCodec::StreamID loPriId_{0};
+  HTTPMessage::HTTPPriority hiPri_{std::make_tuple(0, false, 0)};
+  HTTPMessage::HTTPPriority loPri_{std::make_tuple(0, false, 0)};
+};
+
+std::unique_ptr<HTTPUpstreamSession::PriorityAdapter>
+    TestPriorityMapBuilder::createVirtualStreams(
+        HTTPPriorityMapFactoryProvider* session) const {
+  std::unique_ptr<TestPriorityAdapter>  a =
+      std::make_unique<TestPriorityAdapter>();
+  a->parentId_ = session->sendPriority({0, false, 1});
+
+  std::get<0>(a->hiPri_) = a->parentId_;
+  std::get<2>(a->hiPri_) = hiPriWeight_;
+  a->hiPriId_ = session->sendPriority({a->parentId_, false, hiPriWeight_});
+  a->priorityMap_[hiPriLevel_] = a->hiPri_;
+
+  std::get<0>(a->loPri_) = a->parentId_;
+  std::get<2>(a->loPri_) = loPriWeight_;
+  a->loPriId_ = session->sendPriority({a->parentId_, false, loPriWeight_});
+  a->priorityMap_[loPriLevel_] = a->loPri_;
+
+  a->minPriority_ = a->loPri_;
+
+  return std::move(a);
+}
 
 namespace {
 HTTPMessage getUpgradePostRequest(uint32_t bodyLen,
@@ -64,7 +125,7 @@ getResponseBuf(CodecProtocol protocol, HTTPCodec::StreamID id,
   if (bodyLen > 0) {
     auto buf = makeBuf(bodyLen);
     egressCodec->generateBody(respBufQ, id, std::move(buf),
-                              boost::none, true /* eom */);
+                              HTTPCodec::NoPadding, true /* eom */);
   }
   return respBufQ.move();
 }
@@ -73,7 +134,7 @@ getResponseBuf(CodecProtocol protocol, HTTPCodec::StreamID id,
 
 template <class C>
 class HTTPUpstreamTest: public testing::Test,
-                        public HTTPSession::InfoCallback {
+                        public HTTPSessionBase::InfoCallback {
  public:
   explicit HTTPUpstreamTest(std::vector<int64_t> flowControl = {-1, -1, -1})
       : eventBase_(),
@@ -130,7 +191,6 @@ class HTTPUpstreamTest: public testing::Test,
   void commonSetUp(unique_ptr<HTTPCodec> codec) {
     HTTPSession::setDefaultReadBufferLimit(65536);
     HTTPSession::setDefaultWriteBufferLimit(65536);
-    HTTP2Codec::setHeaderSplitSize(http2::kMaxFramePayloadLengthMin);
     EXPECT_CALL(*transport_, writeChain(_, _, _))
       .WillRepeatedly(Invoke(this, &HTTPUpstreamTest<C>::onWriteChain));
     EXPECT_CALL(*transport_, setReadCB(_))
@@ -138,7 +198,7 @@ class HTTPUpstreamTest: public testing::Test,
     EXPECT_CALL(*transport_, getReadCB())
       .WillRepeatedly(Return(readCallback_));
     EXPECT_CALL(*transport_, getEventBase())
-      .WillRepeatedly(Return(&eventBase_));
+      .WillRepeatedly(ReturnPointee(&eventBasePtr_));
     EXPECT_CALL(*transport_, good())
       .WillRepeatedly(ReturnPointee(&transportGood_));
     EXPECT_CALL(*transport_, closeNow())
@@ -147,20 +207,24 @@ class HTTPUpstreamTest: public testing::Test,
       .WillOnce(Return(false));
     EXPECT_CALL(*transport_, setReplaySafetyCallback(_))
       .WillRepeatedly(SaveArg<0>(&replaySafetyCallback_));
+    EXPECT_CALL(*transport_, attachEventBase(_))
+      .WillRepeatedly(SaveArg<0>(&eventBasePtr_));
+
+    for (auto& param: flowControl_) {
+      if (param < 0) {
+        param = codec->getDefaultWindowSize();
+      }
+    }
     httpSession_ = new HTTPUpstreamSession(
       transactionTimeouts_.get(),
       std::move(AsyncTransportWrapper::UniquePtr(transport_)),
       localAddr_, peerAddr_,
       std::move(codec),
       mockTransportInfo_, this);
-    for (auto& param: flowControl_) {
-      if (param < 0) {
-        param = httpSession_->getCodec().getDefaultWindowSize();
-      }
-    }
     httpSession_->setFlowControl(flowControl_[0], flowControl_[1],
                                  flowControl_[2]);
     httpSession_->setMaxConcurrentOutgoingStreams(10);
+    httpSession_->setEgressSettings({{SettingsId::ENABLE_EX_HEADERS, 1}});
     httpSession_->startNow();
     eventBase_.loop();
     ASSERT_EQ(this->sessionDestroyed_, false);
@@ -168,6 +232,26 @@ class HTTPUpstreamTest: public testing::Test,
 
   unique_ptr<typename C::Codec> makeServerCodec() {
     return ::makeServerCodec<typename C::Codec>(C::version);
+  }
+
+  void enableExHeader(typename C::Codec* serverCodec){
+    if (!serverCodec || serverCodec->getProtocol() != CodecProtocol::HTTP_2) {
+      return;
+    }
+
+    auto clientCodec = makeClientCodec<HTTP2Codec>(2);
+    folly::IOBufQueue c2s{IOBufQueue::cacheChainLength()};
+    clientCodec->getEgressSettings()->setSetting(
+      SettingsId::ENABLE_EX_HEADERS, 1);
+    clientCodec->generateConnectionPreface(c2s);
+    clientCodec->generateSettings(c2s);
+
+    // set ENABLE_EX_HEADERS to 1 in egressSettings
+    serverCodec->getEgressSettings()->setSetting(
+      SettingsId::ENABLE_EX_HEADERS, 1);
+    // set ENABLE_EX_HEADERS to 1 in ingressSettings
+    auto setup = c2s.move();
+    serverCodec->onIngress(*setup);
   }
 
   void parseOutput(HTTPCodec& serverCodec) {
@@ -200,7 +284,7 @@ class HTTPUpstreamTest: public testing::Test,
       bufSize = std::min(bufSize, length);
       memcpy(buf, input, bufSize);
       readCallback_->readDataAvailable(bufSize);
-      eventBase_.loop();
+      eventBasePtr_->loop();
       length -= bufSize;
       input += bufSize;
     }
@@ -210,32 +294,14 @@ class HTTPUpstreamTest: public testing::Test,
   void testBasicRequestHttp10(bool keepalive);
 
   // HTTPSession::InfoCallback interface
-  void onCreate(const HTTPSession&) override { sessionCreated_ = true; }
-  void onIngressError(const HTTPSession&, ProxygenError) override {}
-  void onIngressEOF() override {}
-  void onRead(const HTTPSession&, size_t bytesRead) override {}
-  void onWrite(const HTTPSession&, size_t bytesWritten) override {}
-  void onRequestBegin(const HTTPSession&) override {}
-  void onRequestEnd(const HTTPSession&,
-                    uint32_t maxIngressQueueSize) override {}
-  void onActivateConnection(const HTTPSession&) override {}
-  void onDeactivateConnection(const HTTPSession&) override {}
-  void onDestroy(const HTTPSession&) override { sessionDestroyed_ = true; }
-  void onIngressMessage(const HTTPSession&, const HTTPMessage&) override {}
-  void onIngressLimitExceeded(const HTTPSession&) override {}
-  void onIngressPaused(const HTTPSession&) override {}
-  void onTransactionDetached(const HTTPSession&) override {}
-  void onPingReplySent(int64_t latency) override {}
-  void onPingReplyReceived() override {}
-  void onSettingsOutgoingStreamsFull(const HTTPSession&) override {
+  void onCreate(const HTTPSessionBase&) override { sessionCreated_ = true; }
+  void onDestroy(const HTTPSessionBase&) override { sessionDestroyed_ = true; }
+  void onSettingsOutgoingStreamsFull(const HTTPSessionBase&) override {
     transactionsFull_ = true;
   }
-  void onSettingsOutgoingStreamsNotFull(const HTTPSession&) override {
+  void onSettingsOutgoingStreamsNotFull(const HTTPSessionBase&) override {
     transactionsFull_ = false;
   }
-  void onFlowControlWindowClosed(const HTTPSession&) override {}
-  void onEgressBuffered(const HTTPSession&) override {}
-  void onEgressBufferCleared(const HTTPSession&) override {}
 
   void TearDown() override {
     AsyncSocketException ex(AsyncSocketException::UNKNOWN, "");
@@ -247,7 +313,7 @@ class HTTPUpstreamTest: public testing::Test,
   std::unique_ptr<StrictMock<MockHTTPHandler>> openTransaction(
     bool expectStartPaused = false) {
     // Returns a mock handler with txn_ field set in it
-    auto handler = folly::make_unique<StrictMock<MockHTTPHandler>>();
+    auto handler = std::make_unique<StrictMock<MockHTTPHandler>>();
     handler->expectTransaction();
     if (expectStartPaused) {
       handler->expectEgressPaused();
@@ -260,7 +326,7 @@ class HTTPUpstreamTest: public testing::Test,
   std::unique_ptr<NiceMock<MockHTTPHandler>> openNiceTransaction(
     bool expectStartPaused = false) {
     // Returns a mock handler with txn_ field set in it
-    auto handler = folly::make_unique<NiceMock<MockHTTPHandler>>();
+    auto handler = std::make_unique<NiceMock<MockHTTPHandler>>();
     handler->expectTransaction();
     if (expectStartPaused) {
       handler->expectEgressPaused();
@@ -274,6 +340,26 @@ class HTTPUpstreamTest: public testing::Test,
                          const std::string& upgradeRespHeader,
                          CodecProtocol respCodecVersion);
 
+  MockByteEventTracker* setMockByteEventTracker() {
+    auto byteEventTracker = new MockByteEventTracker(nullptr);
+    httpSession_->setByteEventTracker(
+      std::unique_ptr<ByteEventTracker>(byteEventTracker));
+    EXPECT_CALL(*byteEventTracker, preSend(_, _, _))
+      .WillRepeatedly(Return(0));
+    EXPECT_CALL(*byteEventTracker, drainByteEvents())
+      .WillRepeatedly(Return(0));
+    EXPECT_CALL(*byteEventTracker, processByteEvents(_, _))
+      .WillRepeatedly(Invoke([byteEventTracker]
+                            (std::shared_ptr<ByteEventTracker> self,
+                             uint64_t bytesWritten) {
+                              return self->ByteEventTracker::processByteEvents(
+                                self,
+                                bytesWritten);
+                            }));
+
+    return byteEventTracker;
+  }
+
  protected:
   bool sessionCreated_{false};
   bool sessionDestroyed_{false};
@@ -282,6 +368,7 @@ class HTTPUpstreamTest: public testing::Test,
   bool transportGood_{true};
 
   EventBase eventBase_;
+  EventBase* eventBasePtr_{&eventBase_};
   MockAsyncTransport* transport_;  // invalid once httpSession_ is destroyed
   folly::AsyncTransportWrapper::ReadCallback* readCallback_{nullptr};
   folly::AsyncTransport::ReplaySafetyCallback* replaySafetyCallback_{nullptr};
@@ -313,7 +400,7 @@ class TimeoutableHTTPUpstreamTest: public HTTPUpstreamTest<C> {
   }
 };
 
-typedef HTTPUpstreamTest<HTTP1xCodecPair> HTTPUpstreamSessionTest;
+using HTTPUpstreamSessionTest = HTTPUpstreamTest<HTTP1xCodecPair>;
 typedef HTTPUpstreamTest<SPDY3CodecPair> SPDY3UpstreamSessionTest;
 typedef HTTPUpstreamTest<HTTP2CodecPair> HTTP2UpstreamSessionTest;
 
@@ -325,7 +412,7 @@ TEST_F(SPDY3UpstreamSessionTest, server_push) {
   HTTPMessage push;
   push.getHeaders().set("HOST", "www.foo.com");
   push.setURL("https://www.foo.com/");
-  egressCodec.generateHeader(output, 2, push, 1, false, nullptr);
+  egressCodec.generatePushPromise(output, 2, push, 1, false, nullptr);
   auto buf = makeBuf(100);
   egressCodec.generateBody(output, 2, std::move(buf), HTTPCodec::NoPadding,
                            true /* eom */);
@@ -333,7 +420,7 @@ TEST_F(SPDY3UpstreamSessionTest, server_push) {
   HTTPMessage resp;
   resp.setStatusCode(200);
   resp.setStatusMessage("Ohai");
-  egressCodec.generateHeader(output, 1, resp, 0, false, nullptr);
+  egressCodec.generateHeader(output, 1, resp, false, nullptr);
   buf = makeBuf(100);
   egressCodec.generateBody(output, 1, std::move(buf), HTTPCodec::NoPadding,
                            true /* eom */);
@@ -394,6 +481,7 @@ TEST_F(SPDY3UpstreamSessionTest, ingress_goaway_abort_uncreated_streams) {
   InSequence enforceOrder;
 
   auto handler = openTransaction();
+  handler->expectGoaway();
   handler->expectError([&] (const HTTPException& err) {
       EXPECT_TRUE(err.hasProxygenError());
       EXPECT_EQ(err.getProxygenError(), kErrorStreamUnacknowledged);
@@ -432,6 +520,7 @@ TEST_F(SPDY3UpstreamSessionTest, ingress_goaway_session_error) {
   InSequence enforceOrder;
 
   auto handler = openTransaction();
+  handler->expectGoaway();
   handler->expectError([&] (const HTTPException& err) {
       EXPECT_TRUE(err.hasProxygenError());
       EXPECT_EQ(err.getProxygenError(), kErrorStreamUnacknowledged);
@@ -526,7 +615,7 @@ TEST_F(SPDY3UpstreamSessionTest, test_overlimit_resume) {
   handler2->expectError();
   handler2->expectDetachTransaction();
 
-  httpSession_->shutdownTransportWithReset(kErrorTimeout);
+  httpSession_->dropConnection();
   EXPECT_EQ(this->sessionDestroyed_, true);
 }
 
@@ -546,7 +635,8 @@ TEST_F(HTTP2UpstreamSessionTest, test_priority) {
   auto id = handler1->txn_->getID();
   auto id2 = handler2->txn_->getID();
 
-  EXPECT_EQ(std::get<0>(handler1->txn_->getPrioritySummary()), 0);
+  // Insert depth is 1, only root node has depth 0
+  EXPECT_EQ(std::get<0>(handler1->txn_->getPrioritySummary()), 1);
   EXPECT_EQ(handler1->txn_->getPriorityFallback(), false);
 
   // update handler to be in the pri-group
@@ -585,8 +675,8 @@ TEST_F(HTTP2UpstreamSessionTest, test_priority) {
   EXPECT_EQ(handler1->txn_->getPriorityFallback(), false);
   EXPECT_EQ(handler2->txn_->getPriorityFallback(), true);
 
-  EXPECT_EQ(std::get<1>(handler1->txn_->getPrioritySummary()), 1);
-  EXPECT_EQ(std::get<1>(handler2->txn_->getPrioritySummary()), 0);
+  EXPECT_EQ(std::get<1>(handler1->txn_->getPrioritySummary()), 2);
+  EXPECT_EQ(std::get<1>(handler2->txn_->getPrioritySummary()), 1);
   EXPECT_CALL(callbacks,
               onPriority(priGroupID, HTTPMessage::HTTPPriority(0, false, 255)));
   parseOutput(*serverCodec);
@@ -596,7 +686,7 @@ TEST_F(HTTP2UpstreamSessionTest, test_priority) {
   handler1->expectDetachTransaction();
   handler2->expectError();
   handler2->expectDetachTransaction();
-  httpSession_->shutdownTransportWithReset(kErrorTimeout);
+  httpSession_->dropConnection();
   eventBase_.loop();
   EXPECT_EQ(sessionDestroyed_, true);
 }
@@ -621,11 +711,155 @@ TEST_F(HTTP2UpstreamSessionTest, test_settings_ack) {
   EXPECT_EQ(sessionDestroyed_, true);
 }
 
+TEST_F(HTTP2UpstreamSessionTest, test_settings_info_callbacks) {
+  auto serverCodec = makeServerCodec();
+
+  folly::IOBufQueue settingsBuf{IOBufQueue::cacheChainLength()};
+  serverCodec->generateSettings(settingsBuf);
+  auto settingsFrame = settingsBuf.move();
+
+  folly::IOBufQueue settingsAckBuf{IOBufQueue::cacheChainLength()};
+  serverCodec->generateSettingsAck(settingsAckBuf);
+  auto settingsAckFrame = settingsAckBuf.move();
+
+  MockHTTPSessionInfoCallback infoCb;
+  httpSession_->setInfoCallback(&infoCb);
+
+  EXPECT_CALL(infoCb, onRead(_, _)).Times(2);
+  EXPECT_CALL(infoCb, onWrite(_, _)).Times(1);
+  EXPECT_CALL(infoCb, onDestroy(_)).Times(1);
+
+  EXPECT_CALL(infoCb, onSettings(_, _)).Times(1);
+  EXPECT_CALL(infoCb, onSettingsAck(_)).Times(1);
+
+  InSequence enforceOrder;
+
+  readAndLoop(settingsFrame.get());
+  readAndLoop(settingsAckFrame.get());
+
+  httpSession_->destroy();
+}
+
+TEST_F(HTTP2UpstreamSessionTest, test_setcontroller_initheaderindexingstrat) {
+  StrictMock<MockUpstreamController> mockController;
+  HeaderIndexingStrategy testH2IndexingStrat;
+  EXPECT_CALL(mockController, getHeaderIndexingStrategy())
+    .WillOnce(
+      Return(&testH2IndexingStrat)
+  );
+
+  httpSession_->setController(&mockController);
+
+  auto handler = openTransaction();
+  handler->expectDetachTransaction();
+
+  const HTTP2Codec* h2Codec = static_cast<const HTTP2Codec*>(
+    &handler->txn_->getTransport().getCodec());
+  EXPECT_EQ(h2Codec->getHeaderIndexingStrategy(), &testH2IndexingStrat);
+
+  handler->txn_->sendAbort();
+  eventBase_.loop();
+
+  EXPECT_CALL(mockController, detachSession(_));
+  httpSession_->destroy();
+}
+
+/*
+ * The sequence of streams are generated in the following order:
+ * - [client --> server] setup the control stream (getGetRequest())
+ * - [server --> client] respond to 1st stream (OK, without EOM)
+ * - [server --> client] request 2nd stream (pub, EOM)
+ * - [client --> server] abort the 2nd stream
+ * - [server --> client] respond to 1st stream (EOM)
+ */
+
+TEST_F(HTTP2UpstreamSessionTest, exheader_from_server) {
+  folly::IOBufQueue queue{IOBufQueue::cacheChainLength()};
+
+  // generate enable_ex_headers setting
+  auto serverCodec = makeServerCodec();
+  enableExHeader(serverCodec.get());
+  serverCodec->generateSettings(queue);
+  // generate the response for control stream, but EOM
+  auto cStreamId = HTTPCodec::StreamID(1);
+  serverCodec->generateHeader(queue, cStreamId, getResponse(200, 0),
+                              false, nullptr);
+  // generate a request from server, encapsulated in EX_HEADERS frame
+  serverCodec->generateExHeader(queue, 2, getGetRequest("/messaging"),
+                                cStreamId, true, nullptr);
+  serverCodec->generateEOM(queue, 1);
+
+  auto cHandler = openTransaction();
+  cHandler->sendRequest(getGetRequest("/cc"));
+
+  NiceMock<MockHTTPHandler> pubHandler;
+  InSequence handlerSequence;
+  cHandler->expectHeaders([&] (std::shared_ptr<HTTPMessage> msg) {
+      EXPECT_EQ(200, msg->getStatusCode());
+    });
+
+  EXPECT_CALL(*cHandler, onExTransaction(_))
+    .WillOnce(Invoke([&pubHandler] (HTTPTransaction* pubTxn) {
+          pubTxn->setHandler(&pubHandler);
+          pubHandler.txn_ = pubTxn;
+        }));
+  pubHandler.expectHeaders([&] (std::shared_ptr<HTTPMessage> msg) {
+      EXPECT_EQ(msg->getPath(), "/messaging");
+    });
+  pubHandler.expectEOM([&] () {
+      pubHandler.txn_->sendAbort();
+    });
+  pubHandler.expectDetachTransaction();
+
+  cHandler->expectEOM();
+  cHandler->expectDetachTransaction();
+
+  auto buf = queue.move();
+  buf->coalesce();
+  readAndLoop(buf.get());
+
+  httpSession_->destroy();
+}
+
+TEST_F(HTTP2UpstreamSessionTest, invalid_control_stream) {
+  folly::IOBufQueue queue{IOBufQueue::cacheChainLength()};
+
+  // generate enable_ex_headers setting
+  auto serverCodec = makeServerCodec();
+  enableExHeader(serverCodec.get());
+  serverCodec->generateSettings(queue);
+  // generate the response for control stream, but EOM
+  auto cStreamId = HTTPCodec::StreamID(1);
+  serverCodec->generateHeader(queue, cStreamId, getResponse(200, 0),
+                              false, nullptr);
+  // generate a EX_HEADERS frame with non-existing control stream
+  serverCodec->generateExHeader(queue, 2, getGetRequest("/messaging"),
+                                cStreamId + 2, true, nullptr);
+  serverCodec->generateEOM(queue, 1);
+
+  auto cHandler = openTransaction();
+  cHandler->sendRequest(getGetRequest("/cc"));
+
+  InSequence handlerSequence;
+  cHandler->expectHeaders([&] (std::shared_ptr<HTTPMessage> msg) {
+      EXPECT_EQ(200, msg->getStatusCode());
+    });
+  EXPECT_CALL(*cHandler, onExTransaction(_)).Times(0);
+  cHandler->expectEOM();
+  cHandler->expectDetachTransaction();
+
+  auto buf = queue.move();
+  buf->coalesce();
+  readAndLoop(buf.get());
+
+  httpSession_->destroy();
+}
+
 class HTTP2UpstreamSessionWithVirtualNodesTest:
   public HTTPUpstreamTest<MockHTTPCodecPair> {
  public:
   void SetUp() override {
-    auto codec = folly::make_unique<NiceMock<MockHTTPCodec>>();
+    auto codec = std::make_unique<NiceMock<MockHTTPCodec>>();
     codecPtr_ = codec.get();
     EXPECT_CALL(*codec, supportsParallelRequests())
       .WillRepeatedly(Return(true));
@@ -647,7 +881,6 @@ class HTTP2UpstreamSessionWithVirtualNodesTest:
   void commonSetUp(unique_ptr<HTTPCodec> codec) {
     HTTPSession::setDefaultReadBufferLimit(65536);
     HTTPSession::setDefaultWriteBufferLimit(65536);
-    HTTP2Codec::setHeaderSplitSize(http2::kMaxFramePayloadLengthMin);
     EXPECT_CALL(*transport_, writeChain(_, _, _))
       .WillRepeatedly(Invoke(
             this,
@@ -668,7 +901,10 @@ class HTTP2UpstreamSessionWithVirtualNodesTest:
       std::move(transportPtr),
       localAddr_, peerAddr_,
       std::move(codec),
-      mockTransportInfo_, this, level_);
+      mockTransportInfo_,
+      this,
+      level_,
+      builder_);
     eventBase_.loop();
     ASSERT_EQ(this->sessionDestroyed_, false);
   }
@@ -683,6 +919,7 @@ class HTTP2UpstreamSessionWithVirtualNodesTest:
   uint32_t nextOutgoingTxn_{1};
   std::vector<HTTPCodec::StreamID> dependencies;
   uint8_t level_{3};
+  std::shared_ptr<TestPriorityMapBuilder> builder_;
 };
 
 TEST_F(HTTP2UpstreamSessionWithVirtualNodesTest, virtual_nodes) {
@@ -716,7 +953,63 @@ TEST_F(HTTP2UpstreamSessionWithVirtualNodesTest, virtual_nodes) {
 
   handler.expectError();
   handler.expectDetachTransaction();
-  httpSession_->shutdownTransportWithReset(kErrorNone);
+  httpSession_->dropConnection();
+
+  eventBase_.loop();
+}
+
+class HTTP2UpstreamSessionWithPriorityTree:
+    public HTTP2UpstreamSessionWithVirtualNodesTest {
+public:
+  HTTP2UpstreamSessionWithPriorityTree() {
+    builder_ = std::make_shared<TestPriorityMapBuilder>();
+  }
+};
+
+TEST_F(HTTP2UpstreamSessionWithPriorityTree, priority_tree) {
+  InSequence enforceOrder;
+
+  std::array<HTTPCodec::StreamID, 3> deps = { {11, 13, 15} };
+  EXPECT_CALL(*codecPtr_, addPriorityNodes(_, _, _))
+    .Times(0)
+    .WillOnce(Invoke([&] (
+            HTTPCodec::PriorityQueue&,
+            folly::IOBufQueue&,
+            uint8_t maxLevel) {
+          for (size_t i = 0; i < maxLevel; i++) {
+            dependencies.push_back(deps[i]);
+          }
+          return 123;
+        }));
+  httpSession_->startNow();
+
+  // It should have built the virtual streams from the tree but not the old
+  // priority levels.
+  EXPECT_EQ(dependencies.size(), 0);
+  HTTPMessage::HTTPPriority hiPri =
+      *httpSession_->getHTTPPriority(builder_->hiPriLevel_);
+  EXPECT_EQ(std::get<2>(hiPri), builder_->hiPriWeight_);
+  HTTPMessage::HTTPPriority loPri =
+      *httpSession_->getHTTPPriority(builder_->loPriLevel_);
+  EXPECT_EQ(std::get<2>(loPri), builder_->loPriWeight_);
+
+  for (size_t level = 0; level < 256; ++level) {
+    if (level == builder_->hiPriLevel_) {
+      continue;
+    }
+    HTTPMessage::HTTPPriority pri = *httpSession_->getHTTPPriority(level);
+    EXPECT_EQ(pri, loPri);
+  }
+
+  StrictMock<MockHTTPHandler> handler;
+  handler.expectTransaction();
+  auto txn = httpSession_->newTransaction(&handler);
+
+  txn->updateAndSendPriority(0);
+
+  handler.expectError();
+  handler.expectDetachTransaction();
+  httpSession_->dropConnection();
 
   eventBase_.loop();
 }
@@ -765,6 +1058,37 @@ TEST_F(HTTPUpstreamSessionTest, 10_requests) {
   for (uint16_t i = 0; i < 10; i++) {
     testBasicRequest();
   }
+  httpSession_->destroy();
+}
+
+TEST_F(HTTPUpstreamSessionTest, test_first_header_byte_event_tracker) {
+  auto byteEventTracker = setMockByteEventTracker();
+
+  EXPECT_CALL(*byteEventTracker, addFirstHeaderByteEvent(_, _))
+      .WillOnce(Invoke([] (uint64_t /*byteNo*/,
+                           HTTPTransaction* txn) {
+                         txn->incrementPendingByteEvents();
+                       }));
+
+  InSequence enforceOrder;
+
+  auto handler = openTransaction();
+  handler->expectHeaders([&] (std::shared_ptr<HTTPMessage> msg) {
+      EXPECT_TRUE(msg->getIsChunked());
+      EXPECT_FALSE(msg->getIsUpgraded());
+      EXPECT_EQ(200, msg->getStatusCode());
+    });
+  handler->expectEOM();
+  handler->expectDetachTransaction();
+
+  handler->sendRequest();
+  readAndLoop("HTTP/1.1 200 OK\r\n"
+              "Transfer-Encoding: chunked\r\n\r\n"
+              "0\r\n\r\n");
+
+  CHECK(httpSession_->supportsMoreTransactions());
+  CHECK_EQ(httpSession_->getNumOutgoingStreams(), 0);
+  handler->txn_->decrementPendingByteEvents();
   httpSession_->destroy();
 }
 
@@ -858,7 +1182,7 @@ TEST_F(HTTPUpstreamSessionTest, two_requests_with_pause) {
   httpSession_->destroy();
 }
 
-typedef TimeoutableHTTPUpstreamTest<HTTP1xCodecPair> HTTPUpstreamTimeoutTest;
+using HTTPUpstreamTimeoutTest = TimeoutableHTTPUpstreamTest<HTTP1xCodecPair>;
 TEST_F(HTTPUpstreamTimeoutTest, write_timeout_after_response) {
   // Test where the upstream session times out while writing the request
   // to the server, but after the server has already sent back a full
@@ -905,6 +1229,15 @@ TEST_F(HTTPUpstreamSessionTest, set_transaction_timeout) {
   EXPECT_TRUE(handler->txn_->isScheduled());
   EXPECT_EQ(transactionTimeouts_->count(), 1);
   handler->txn_->sendAbort();
+  eventBase_.loop();
+}
+
+TEST_F(HTTPUpstreamSessionTest, read_timeout) {
+  NiceMock<MockUpstreamController> controller;
+  httpSession_->setController(&controller);
+  auto cm = wangle::ConnectionManager::makeUnique(
+    &eventBase_, std::chrono::milliseconds(50));
+  cm->addConnection(httpSession_, true);
   eventBase_.loop();
 }
 
@@ -1015,6 +1348,14 @@ void HTTPUpstreamTest<CodecPair>::testSimpleUpgrade(
 
   EXPECT_EQ(httpSession_->getMaxConcurrentOutgoingStreams(), 1);
 
+  HeaderIndexingStrategy testH2IndexingStrat;
+  if (respCodecVersion == CodecProtocol::HTTP_2) {
+    EXPECT_CALL(controller, getHeaderIndexingStrategy())
+      .WillOnce(
+        Return(&testH2IndexingStrat)
+    );
+  }
+
   handler->expectHeaders([] (std::shared_ptr<HTTPMessage> msg) {
       EXPECT_EQ(200, msg->getStatusCode());
     });
@@ -1031,18 +1372,18 @@ void HTTPUpstreamTest<CodecPair>::testSimpleUpgrade(
   readAndLoop(folly::to<string>("HTTP/1.1 101 Switching Protocols\r\n"
                                 "Upgrade: ", upgradeRespHeader, "\r\n"
                                 "\r\n"));
+
+  if (respCodecVersion == CodecProtocol::HTTP_2) {
+    const HTTP2Codec* codec = dynamic_cast<const HTTP2Codec*>(
+      &txn->getTransport().getCodec());
+    ASSERT_NE(codec, nullptr);
+    EXPECT_EQ(codec->getHeaderIndexingStrategy(), &testH2IndexingStrat);
+  }
+
   readAndLoop(getResponseBuf(respCodecVersion, txn->getID(), 200, 100).get());
 
   EXPECT_EQ(httpSession_->getMaxConcurrentOutgoingStreams(), 10);
   httpSession_->destroy();
-}
-
-TEST_F(HTTPUpstreamSessionTest, http_upgrade_native_3) {
-  testSimpleUpgrade("spdy/3", "spdy/3", CodecProtocol::SPDY_3);
-}
-
-TEST_F(HTTPUpstreamSessionTest, http_upgrade_native_3_1) {
-  testSimpleUpgrade("spdy/3.1", "spdy/3.1", CodecProtocol::SPDY_3_1);
 }
 
 TEST_F(HTTPUpstreamSessionTest, http_upgrade_native_h2) {
@@ -1051,19 +1392,19 @@ TEST_F(HTTPUpstreamSessionTest, http_upgrade_native_h2) {
 
 // Upgrade to SPDY/3.1 with a non-native proto in the list
 TEST_F(HTTPUpstreamSessionTest, http_upgrade_native_unknown) {
-  testSimpleUpgrade("blarf, spdy/3", "spdy/3", CodecProtocol::SPDY_3);
+  testSimpleUpgrade("blarf, h2c", "h2c", CodecProtocol::HTTP_2);
 }
 
 // Upgrade header with extra whitespace
 TEST_F(HTTPUpstreamSessionTest, http_upgrade_native_whitespace) {
-  testSimpleUpgrade("blarf, \tspdy/3\t, xyz", "spdy/3",
-                    CodecProtocol::SPDY_3);
+  testSimpleUpgrade("blarf, \th2c\t, xyz", "h2c",
+                    CodecProtocol::HTTP_2);
 }
 
 // Upgrade header with random junk
 TEST_F(HTTPUpstreamSessionTest, http_upgrade_native_junk) {
-  testSimpleUpgrade(",,,,   ,,\t~^%$(*&@(@$^^*(,spdy/3", "spdy/3",
-                    CodecProtocol::SPDY_3);
+  testSimpleUpgrade(",,,,   ,,\t~^%$(*&@(@$^^*(,h2c", "h2c",
+                    CodecProtocol::HTTP_2);
 }
 
 TEST_F(HTTPUpstreamSessionTest, http_upgrade_101_unexpected) {
@@ -1127,7 +1468,7 @@ TEST_F(HTTPUpstreamSessionTest, http_upgrade_post_100) {
   handler->expectDetachTransaction();
 
   auto txn = handler->txn_;
-  HTTPMessage req = getUpgradePostRequest(100, "spdy/3", true /* 100 */);
+  HTTPMessage req = getUpgradePostRequest(100, "h2c", true /* 100 */);
   txn->sendHeaders(req);
   auto buf = makeBuf(100);
   txn->sendBody(std::move(buf));
@@ -1136,15 +1477,14 @@ TEST_F(HTTPUpstreamSessionTest, http_upgrade_post_100) {
   readAndLoop(folly::to<string>("HTTP/1.1 100 Continue\r\n"
                                 "\r\n"
                                 "HTTP/1.1 101 Switching Protocols\r\n"
-                                "Upgrade: spdy/3\r\n"
+                                "Upgrade: h2c\r\n"
                                 "\r\n"));
   readAndLoop(
-    getResponseBuf(CodecProtocol::SPDY_3, txn->getID(), 200, 100).get());
+    getResponseBuf(CodecProtocol::HTTP_2, txn->getID(), 200, 100).get());
   httpSession_->destroy();
 }
 
-
-TEST_F(HTTPUpstreamSessionTest, http_upgrade_post_100_spdy) {
+TEST_F(HTTPUpstreamSessionTest, http_upgrade_post_100_http2) {
   InSequence dummy;
   auto handler = openTransaction();
 
@@ -1159,20 +1499,19 @@ TEST_F(HTTPUpstreamSessionTest, http_upgrade_post_100_spdy) {
   handler->expectDetachTransaction();
 
   auto txn = handler->txn_;
-  HTTPMessage req = getUpgradePostRequest(100, "spdy/3");
+  HTTPMessage req = getUpgradePostRequest(100, "h2c");
   txn->sendHeaders(req);
   auto buf = makeBuf(100);
   txn->sendBody(std::move(buf));
   txn->sendEOM();
   eventBase_.loop();
   readAndLoop(folly::to<string>("HTTP/1.1 101 Switching Protocols\r\n"
-                                "Upgrade: spdy/3\r\n"
+                                "Upgrade: h2c\r\n"
                                 "\r\n"));
-  readAndLoop(getResponseBuf(CodecProtocol::SPDY_3,
+  readAndLoop(getResponseBuf(CodecProtocol::HTTP_2,
                              txn->getID(), 200, 100, true).get());
   httpSession_->destroy();
 }
-
 
 TEST_F(HTTPUpstreamSessionTest, http_upgrade_on_txn2) {
   InSequence dummy;
@@ -1253,7 +1592,7 @@ class NoFlushUpstreamSessionTest: public HTTPUpstreamTest<SPDY3CodecPair> {
     // do nothing -- let unacked egress build up
   }
 
-  ~NoFlushUpstreamSessionTest() {
+  ~NoFlushUpstreamSessionTest() override {
     AsyncSocketException ex(AsyncSocketException::UNKNOWN, "");
     for (auto& cb : cbs_) {
       cb->writeErr(0, ex);
@@ -1285,7 +1624,7 @@ TEST_F(NoFlushUpstreamSessionTest, session_paused_start_paused) {
   eventBase_.loop();
   Mock::VerifyAndClearExpectations(handler2.get());
 
-  httpSession_->shutdownTransportWithReset(kErrorTimeout);
+  httpSession_->dropConnection();
 }
 
 TEST_F(NoFlushUpstreamSessionTest, delete_txn_on_unpause) {
@@ -1302,7 +1641,7 @@ TEST_F(NoFlushUpstreamSessionTest, delete_txn_on_unpause) {
   auto handler3 = openNiceTransaction();
   handler2->expectEgressPaused([this] {
       // This time it is invoked by the session on all transactions
-      httpSession_->shutdownTransportWithReset(kErrorTimeout);
+      httpSession_->dropConnection();
     });
   handler2->txn_->sendHeaders(req);
   // This happens when the body write fills the txn egress queue
@@ -1315,7 +1654,7 @@ TEST_F(NoFlushUpstreamSessionTest, delete_txn_on_unpause) {
 class MockHTTPUpstreamTest: public HTTPUpstreamTest<MockHTTPCodecPair> {
  public:
   void SetUp() override {
-    auto codec = folly::make_unique<NiceMock<MockHTTPCodec>>();
+    auto codec = std::make_unique<NiceMock<MockHTTPCodec>>();
     codecPtr_ = codec.get();
     EXPECT_CALL(*codec, supportsParallelRequests())
       .WillRepeatedly(Return(true));
@@ -1359,7 +1698,7 @@ class MockHTTPUpstreamTest: public HTTPUpstreamTest<MockHTTPCodecPair> {
 
   std::unique_ptr<StrictMock<MockHTTPHandler>> openTransaction() {
     // Returns a mock handler with txn_ field set in it
-    auto handler = folly::make_unique<StrictMock<MockHTTPHandler>>();
+    auto handler = std::make_unique<StrictMock<MockHTTPHandler>>();
     handler->expectTransaction();
     auto txn = httpSession_->newTransaction(handler.get());
     EXPECT_EQ(txn, handler->txn_);
@@ -1373,8 +1712,7 @@ class MockHTTPUpstreamTest: public HTTPUpstreamTest<MockHTTPCodecPair> {
 };
 
 TEST_F(HTTP2UpstreamSessionTest, server_push) {
-  httpSession_->getCodec().getEgressSettings()->
-    setSetting(SettingsId::ENABLE_PUSH, true);
+  httpSession_->setEgressSettings({{SettingsId::ENABLE_PUSH, 1}});
 
   auto egressCodec = makeServerCodec();
   folly::IOBufQueue output(folly::IOBufQueue::cacheChainLength());
@@ -1384,20 +1722,20 @@ TEST_F(HTTP2UpstreamSessionTest, server_push) {
   push.setURL("https://www.foo.com/");
   egressCodec->generateSettings(output);
   // PUSH_PROMISE
-  egressCodec->generateHeader(output, 2, push, 1);
+  egressCodec->generatePushPromise(output, 2, push, 1);
 
   // Pushed resource
   HTTPMessage resp;
   resp.setStatusCode(200);
   resp.getHeaders().set("ohai", "push");
-  egressCodec->generateHeader(output, 2, resp, 0);
+  egressCodec->generateHeader(output, 2, resp);
   auto buf = makeBuf(100);
   egressCodec->generateBody(output, 2, std::move(buf), HTTPCodec::NoPadding,
                             true /* eom */);
 
   // Original resource
   resp.getHeaders().set("ohai", "orig");
-  egressCodec->generateHeader(output, 1, resp, 0);
+  egressCodec->generateHeader(output, 1, resp);
   buf = makeBuf(100);
   egressCodec->generateBody(output, 1, std::move(buf), HTTPCodec::NoPadding,
                            true /* eom */);
@@ -1470,10 +1808,9 @@ TEST_F(MockHTTP2UpstreamTest, parse_error_no_txn) {
   // Expect that the codec should be asked to generate an abort on streamID==1
 
   // Setup the codec expectations.
-  EXPECT_CALL(*codecPtr_, generateHeader(_, _, _, _, _, _))
+  EXPECT_CALL(*codecPtr_, generateHeader(_, _, _, _, _))
     .WillOnce(Invoke([] (folly::IOBufQueue& writeBuf, HTTPCodec::StreamID,
-                         const HTTPMessage&, HTTPCodec::StreamID, bool,
-                         HTTPHeaderSize*) {
+                         const HTTPMessage&, bool, HTTPHeaderSize*) {
                        writeBuf.append("1", 1);
                      }));
   EXPECT_CALL(*codecPtr_, generateEOM(_, _))
@@ -1498,7 +1835,7 @@ TEST_F(MockHTTP2UpstreamTest, parse_error_no_txn) {
 
   // cleanup
   handler->expectDetachTransaction();
-  httpSession_->shutdownTransportWithReset(kErrorConnectionReset);
+  httpSession_->dropConnection();
   eventBase_.loop();
 }
 
@@ -1509,7 +1846,7 @@ TEST_F(MockHTTPUpstreamTest, 0_max_outgoing_txns) {
 
   codecCb_->onSettings({{SettingsId::MAX_CONCURRENT_STREAMS, 0}});
   EXPECT_TRUE(transactionsFull_);
-  httpSession_->shutdownTransportWithReset(kErrorConnectionReset);
+  httpSession_->dropConnection();
 }
 
 TEST_F(MockHTTPUpstreamTest, outgoing_txn_settings) {
@@ -1527,7 +1864,7 @@ TEST_F(MockHTTPUpstreamTest, outgoing_txn_settings) {
   EXPECT_TRUE(transactionsFull_);
   codecCb_->onSettings({{SettingsId::MAX_CONCURRENT_STREAMS, 100}});
   EXPECT_FALSE(transactionsFull_);
-  httpSession_->shutdownTransportWithReset(kErrorConnectionReset);
+  httpSession_->dropConnection();
 }
 
 TEST_F(MockHTTPUpstreamTest, ingress_goaway_drain) {
@@ -1537,6 +1874,7 @@ TEST_F(MockHTTPUpstreamTest, ingress_goaway_drain) {
   InSequence enforceOrder;
 
   auto handler = openTransaction();
+  EXPECT_CALL(*handler, onGoaway(ErrorCode::NO_ERROR));
   handler->expectHeaders([&] (std::shared_ptr<HTTPMessage> msg) {
       EXPECT_FALSE(msg->getIsUpgraded());
       EXPECT_EQ(200, msg->getStatusCode());
@@ -1608,15 +1946,13 @@ TEST_F(MockHTTPUpstreamTest, goaway_pre_headers) {
   InSequence enforceOrder;
 
   handler.expectTransaction();
-  EXPECT_CALL(*codecPtr_, generateHeader(_, _, _, _, _, _))
-    .WillOnce(Invoke([&] (IOBufQueue& writeBuf,
-                          HTTPCodec::StreamID stream,
-                          const HTTPMessage& msg,
-                          HTTPCodec::StreamID assocStream,
-                          bool eom,
-                          HTTPHeaderSize* size) {
-                       writeBuf.append("HEADERS", 7);
-                     }));
+  EXPECT_CALL(*codecPtr_, generateHeader(_, _, _, _, _))
+      .WillOnce(Invoke(
+          [&](IOBufQueue& writeBuf,
+              HTTPCodec::StreamID /*stream*/,
+              const HTTPMessage& /*msg*/,
+              bool /*eom*/,
+              HTTPHeaderSize* /*size*/) { writeBuf.append("HEADERS", 7); }));
   handler.expectHeaders([&] (std::shared_ptr<HTTPMessage> msg) {
       EXPECT_FALSE(msg->getIsUpgraded());
       EXPECT_EQ(200, msg->getStatusCode());
@@ -1654,6 +1990,7 @@ TEST_F(MockHTTPUpstreamTest, no_window_update_on_drain) {
   httpSession_->drain();
   auto streamID = handler->txn_->getID();
 
+  EXPECT_CALL(*handler, onGoaway(ErrorCode::NO_ERROR));
   handler->expectHeaders([&] (std::shared_ptr<HTTPMessage> msg) {
       EXPECT_FALSE(msg->getIsUpgraded());
       EXPECT_EQ(200, msg->getStatusCode());
@@ -1670,28 +2007,28 @@ TEST_F(MockHTTPUpstreamTest, no_window_update_on_drain) {
 
   // We'll get exactly one window update because we are draining
   EXPECT_CALL(*codecPtr_, generateWindowUpdate(_, _, _))
-    .WillOnce(Invoke([&]
-                     (folly::IOBufQueue& writeBuf,
-                      HTTPCodec::StreamID stream,
-                      uint32_t delta) {
-                       EXPECT_EQ(delta, sendWindow);
-                       outstanding -= delta;
-                       uint32_t len = std::min(toSend,
-                                               sendWindow - outstanding);
-                       EXPECT_LT(len, sendWindow);
-                       toSend -= len;
-                       EXPECT_EQ(toSend, 0);
-                       eventBase_.tryRunAfterDelay([this, streamID, len] {
-                           failWrites_ = true;
-                           auto respBody = makeBuf(len);
-                           codecCb_->onBody(streamID, std::move(respBody), 0);
-                           codecCb_->onMessageComplete(streamID, false);
-                         }, 50);
+      .WillOnce(Invoke([&](folly::IOBufQueue& writeBuf,
+                           HTTPCodec::StreamID /*stream*/,
+                           uint32_t delta) {
+        EXPECT_EQ(delta, sendWindow);
+        outstanding -= delta;
+        uint32_t len = std::min(toSend, sendWindow - outstanding);
+        EXPECT_LT(len, sendWindow);
+        toSend -= len;
+        EXPECT_EQ(toSend, 0);
+        eventBase_.tryRunAfterDelay(
+            [this, streamID, len] {
+              failWrites_ = true;
+              auto respBody = makeBuf(len);
+              codecCb_->onBody(streamID, std::move(respBody), 0);
+              codecCb_->onMessageComplete(streamID, false);
+            },
+            50);
 
-                       const std::string dummy("window");
-                       writeBuf.append(dummy);
-                       return 6;
-                     }));
+        const std::string dummy("window");
+        writeBuf.append(dummy);
+        return 6;
+      }));
 
   codecCb_->onGoaway(streamID, ErrorCode::NO_ERROR);
   auto resp = makeResponse(200);
@@ -1721,7 +2058,7 @@ TEST_F(MockHTTPUpstreamTest, get_with_body) {
 
   InSequence enforceOrder;
 
-  EXPECT_CALL(*codecPtr_, generateHeader(_, _, _, _, _, _));
+  EXPECT_CALL(*codecPtr_, generateHeader(_, _, _, _, _));
   EXPECT_CALL(*codecPtr_, generateBody(_, _, _, _, true));
 
   auto txn = httpSession_->newTransaction(&handler);
@@ -1730,19 +2067,19 @@ TEST_F(MockHTTPUpstreamTest, get_with_body) {
   txn->sendEOM();
 
   eventBase_.loop();
-  httpSession_->shutdownTransportWithReset(kErrorConnectionReset);
+  httpSession_->dropConnection();
 }
 
 TEST_F(MockHTTPUpstreamTest, header_with_eom) {
   NiceMock<MockHTTPHandler> handler;
   HTTPMessage req = getGetRequest();
-  EXPECT_CALL(*codecPtr_, generateHeader(_, _, _, _, true, _));
+  EXPECT_CALL(*codecPtr_, generateHeader(_, _, _, true, _));
 
   auto txn = httpSession_->newTransaction(&handler);
   txn->sendHeadersWithEOM(req);
   eventBase_.loop();
   EXPECT_TRUE(txn->isEgressComplete());
-  httpSession_->shutdownTransportWithReset(kErrorConnectionReset);
+  httpSession_->dropConnection();
 }
 
 template <int stage>
@@ -1768,7 +2105,7 @@ class TestAbortPost : public MockHTTPUpstreamTest {
     std::tie(resp, respBody) = makeResponse(200, 50);
 
     handler.expectTransaction();
-    EXPECT_CALL(*codecPtr_, generateHeader(_, _, _, _, _, _));
+    EXPECT_CALL(*codecPtr_, generateHeader(_, _, _, _, _));
 
     if (stage > 0) {
       handler.expectHeaders();
@@ -1824,7 +2161,7 @@ class TestAbortPost : public MockHTTPUpstreamTest {
       doAbort();
     }
     codecCb_->onTrailersComplete(streamID,
-                                 folly::make_unique<HTTPHeaders>());
+                                 std::make_unique<HTTPHeaders>());
     if (stage == 5) {
       doAbort();
     }
@@ -1856,7 +2193,7 @@ TEST_F(MockHTTPUpstreamTest, abort_upgrade) {
   std::unique_ptr<HTTPMessage> resp = makeResponse(200);
 
   handler.expectTransaction();
-  EXPECT_CALL(*codecPtr_, generateHeader(_, _, _, _, _, _));
+  EXPECT_CALL(*codecPtr_, generateHeader(_, _, _, _, _));
 
   auto txn = httpSession_->newTransaction(&handler);
   const auto streamID = txn->getID();
@@ -1886,7 +2223,7 @@ TEST_F(MockHTTPUpstreamTest, drain_before_send_headers) {
   MockHTTPHandler pushHandler;
 
   auto handler = openTransaction();
-  EXPECT_CALL(*codecPtr_, generateHeader(_, _, _, _, _, _));
+  EXPECT_CALL(*codecPtr_, generateHeader(_, _, _, _, _));
 
   handler->expectHeaders();
   handler->expectEOM();
@@ -1911,12 +2248,16 @@ TEST_F(MockHTTP2UpstreamTest, receive_double_goaway) {
   auto handler2 = openTransaction();
 
   // Get first goaway acking many un-started txns
+  handler1->expectGoaway();
+  handler2->expectGoaway();
   codecCb_->onGoaway(101, ErrorCode::NO_ERROR);
 
   // This txn should be alive since it was ack'd by the above goaway
   handler1->txn_->sendHeaders(req);
 
   // Second goaway acks the only the current outstanding transaction
+  handler1->expectGoaway();
+  handler2->expectGoaway();
   handler2->expectError([&] (const HTTPException& err) {
       EXPECT_TRUE(err.hasProxygenError());
       EXPECT_EQ(err.getProxygenError(), kErrorStreamUnacknowledged);
@@ -2045,7 +2386,7 @@ TEST_F(MockHTTP2UpstreamTest, server_push_handler_install_fail) {
               generateRstStream(_, pushID, ErrorCode::_SPDY_INVALID_STREAM))
     .Times(2);
 
-  auto resp = folly::make_unique<HTTPMessage>();
+  auto resp = std::make_unique<HTTPMessage>();
   resp->setStatusCode(200);
   resp->setStatusMessage("OK");
   codecCb_->onPushMessageBegin(pushID, streamID, resp.get());
@@ -2058,7 +2399,7 @@ TEST_F(MockHTTP2UpstreamTest, server_push_handler_install_fail) {
     });
   handler->expectEOM();
 
-  resp = folly::make_unique<HTTPMessage>();
+  resp = std::make_unique<HTTPMessage>();
   resp->setStatusCode(200);
   resp->setStatusMessage("OK");
   codecCb_->onMessageBegin(streamID, resp.get());
@@ -2093,7 +2434,7 @@ TEST_F(MockHTTP2UpstreamTest, server_push_unhandled_assoc) {
               generateRstStream(_, pushID, ErrorCode::_SPDY_INVALID_STREAM))
     .Times(2);
 
-  auto resp = folly::make_unique<HTTPMessage>();
+  auto resp = std::make_unique<HTTPMessage>();
   resp->setStatusCode(200);
   resp->setStatusMessage("OK");
   codecCb_->onPushMessageBegin(pushID, streamID, resp.get());
@@ -2134,11 +2475,14 @@ TEST_F(MockHTTPUpstreamTest, headers_then_body_then_headers) {
 }
 
 TEST_F(MockHTTP2UpstreamTest, delay_upstream_window_update) {
+  EXPECT_CALL(*codecPtr_, supportsStreamFlowControl())
+    .WillRepeatedly(Return(true));
+
   auto handler = openTransaction();
   handler->txn_->setReceiveWindow(1000000); // One miiiillion
 
   InSequence enforceOrder;
-  EXPECT_CALL(*codecPtr_, generateHeader(_, _, _, _, _, _));
+  EXPECT_CALL(*codecPtr_, generateHeader(_, _, _, _, _));
   EXPECT_CALL(*codecPtr_, generateWindowUpdate(_, _, _));
 
   HTTPMessage req = getGetRequest();
@@ -2152,11 +2496,12 @@ TEST_F(MockHTTPUpstreamTest, force_shutdown_in_set_transaction) {
   StrictMock<MockHTTPHandler> handler;
   handler.expectTransaction([&] (HTTPTransaction* txn) {
       handler.txn_ = txn;
-      httpSession_->shutdownTransportWithReset(kErrorNone);
+      httpSession_->dropConnection();
     });
   handler.expectError([&] (const HTTPException& err) {
-      EXPECT_FALSE(err.hasProxygenError());
-      ASSERT_EQ(folly::to<std::string>("None on transaction id: ",
+      EXPECT_TRUE(err.hasProxygenError());
+      EXPECT_EQ(err.getProxygenError(), kErrorDropped);
+      ASSERT_EQ(folly::to<std::string>("Dropped on transaction id: ",
                                        handler.txn_->getID()),
         std::string(err.what()));
     });
@@ -2180,8 +2525,8 @@ TEST_F(HTTP2UpstreamSessionTest, test_replay_safety_callback) {
 
   ON_CALL(*transport_, isReplaySafe())
     .WillByDefault(Return(true));
-  EXPECT_CALL(cb1, onReplaySafe());
-  EXPECT_CALL(cb3, onReplaySafe());
+  EXPECT_CALL(cb1, onReplaySafe_());
+  EXPECT_CALL(cb3, onReplaySafe_());
   replaySafetyCallback_->onReplaySafe();
 
   httpSession_->destroy();
@@ -2194,7 +2539,7 @@ TEST_F(HTTP2UpstreamSessionTest, test_already_replay_safe) {
 
   EXPECT_CALL(*transport_, isReplaySafe())
     .WillRepeatedly(Return(true));
-  EXPECT_CALL(cb, onReplaySafe());
+  EXPECT_CALL(cb, onReplaySafe_());
   sock->addWaitingForReplaySafety(&cb);
 
   httpSession_->destroy();
@@ -2213,9 +2558,56 @@ TEST_F(HTTP2UpstreamSessionTest ,test_chained_buf_ingress) {
   httpSession_->destroy();
 }
 
+TEST_F(HTTP2UpstreamSessionTest, attach_detach) {
+  folly::EventBase base;
+  auto timer =
+    folly::HHWheelTimer::newTimer(
+      &base,
+      std::chrono::milliseconds(folly::HHWheelTimer::DEFAULT_TICK_INTERVAL),
+      TimeoutManager::InternalEnum::INTERNAL, std::chrono::milliseconds(500));
+  WheelTimerInstance timerInstance(timer.get());
+  uint64_t filterCount = 0;
+  auto fn = [&filterCount](HTTPCodecFilter* /*filter*/) { filterCount++; };
+
+  InSequence enforceOrder;
+  auto egressCodec = makeServerCodec();
+  folly::IOBufQueue output(folly::IOBufQueue::cacheChainLength());
+  egressCodec->generateConnectionPreface(output);
+  egressCodec->generateSettings(output);
+
+  for (auto i = 0; i < 2; i++) {
+    auto handler = openTransaction();
+    handler->expectHeaders([&] (std::shared_ptr<HTTPMessage> msg) {
+        EXPECT_EQ(200, msg->getStatusCode());
+      });
+    handler->expectBody();
+    handler->expectEOM();
+    handler->expectDetachTransaction();
+
+    HTTPMessage resp;
+    resp.setStatusCode(200);
+    egressCodec->generateHeader(output, handler->txn_->getID(), resp);
+    egressCodec->generateBody(output, handler->txn_->getID(), makeBuf(20),
+                              HTTPCodec::NoPadding, true /* eom */);
+
+    handler->sendRequest();
+    auto buf = output.move();
+    buf->coalesce();
+    readAndLoop(buf.get());
+
+    httpSession_->detachThreadLocals();
+    httpSession_->attachThreadLocals(&base, nullptr, timerInstance, nullptr, fn,
+                                     nullptr, nullptr);
+    EXPECT_EQ(filterCount, 2);
+    filterCount = 0;
+    base.loopOnce();
+  }
+  httpSession_->destroy();
+}
+
 // Register and instantiate all our type-paramterized tests
 REGISTER_TYPED_TEST_CASE_P(HTTPUpstreamTest,
                            immediate_eof);
 
-typedef ::testing::Types<HTTP1xCodecPair, SPDY3CodecPair> AllTypes;
+using AllTypes = ::testing::Types<HTTP1xCodecPair, SPDY3CodecPair>;
 INSTANTIATE_TYPED_TEST_CASE_P(AllTypesPrefix, HTTPUpstreamTest, AllTypes);

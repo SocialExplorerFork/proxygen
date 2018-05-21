@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -31,7 +31,6 @@ class HTTPChecks: public PassThroughHTTPCodecFilter {
   void generateHeader(folly::IOBufQueue& writeBuf,
                       StreamID stream,
                       const HTTPMessage& msg,
-                      StreamID assocStream,
                       bool eom,
                       HTTPHeaderSize* sizeOut) override;
 };

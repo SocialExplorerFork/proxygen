@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -8,7 +8,7 @@
  *
  */
 #pragma once
-#include <gtest/gtest.h>
+#include <folly/portability/GTest.h>
 #include <proxygen/lib/utils/Logging.h>
 #include <proxygen/lib/http/codec/test/TestUtils.h>
 #include <proxygen/lib/http/codec/HTTPParallelCodec.h>
@@ -74,7 +74,6 @@ class HTTPParallelCodecTest : public testing::Test {
         "/tmp/parallel_", endpoint, "_", testInfo_->name(), ".bin");
     proxygen::dumpBinToFile(filename, output_.front());
   }
-
 
  protected:
   proxygen::FakeHTTPCodecCallback callbacks_;
