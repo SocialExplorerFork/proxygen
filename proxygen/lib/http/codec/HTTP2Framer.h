@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -9,9 +9,9 @@
  */
 #pragma once
 
-#include <boost/optional/optional.hpp>
 #include <cstdint>
 #include <deque>
+#include <folly/Optional.h>
 #include <folly/Range.h>
 #include <folly/io/Cursor.h>
 #include <proxygen/lib/http/codec/ErrorCode.h>
@@ -25,12 +25,11 @@ namespace proxygen { namespace http2 {
 
 //////// Constants ////////
 
-extern const uint8_t kMaxFrameType;
-extern const boost::optional<uint8_t> kNoPadding;
+extern const uint8_t kMinExperimentalFrameType;
+using Padding = folly::Optional<uint8_t>;
+extern const Padding kNoPadding;
 
 //////// Types ////////
-
-typedef boost::optional<uint8_t> Padding;
 
 enum class FrameType: uint8_t {
   DATA = 0,
@@ -44,6 +43,9 @@ enum class FrameType: uint8_t {
   WINDOW_UPDATE = 8,
   CONTINUATION = 9,
   ALTSVC = 10,  // not in current draft so frame type has not been assigned
+
+  // experimental use
+  EX_HEADERS = 0xfb,
 };
 
 enum Flags {
@@ -75,6 +77,8 @@ struct PriorityUpdate {
 FB_EXPORT extern const PriorityUpdate DefaultPriority;
 
 //////// Functions ////////
+
+extern bool isValidFrameType(FrameType t);
 
 extern bool frameAffectsCompression(FrameType t);
 
@@ -149,8 +153,15 @@ parseDataEnd(folly::io::Cursor& cursor,
 extern ErrorCode
 parseHeaders(folly::io::Cursor& cursor,
              FrameHeader header,
-             boost::optional<PriorityUpdate>& outPriority,
+             folly::Optional<PriorityUpdate>& outPriority,
              std::unique_ptr<folly::IOBuf>& outBuf) noexcept;
+
+extern ErrorCode
+parseExHeaders(folly::io::Cursor& cursor,
+               FrameHeader header,
+               uint32_t& outControlStream,
+               folly::Optional<PriorityUpdate>& outPriority,
+               std::unique_ptr<folly::IOBuf>& outBuf) noexcept;
 
 /**
  * This function parses the section of the PRIORITY frame after the common
@@ -329,25 +340,27 @@ parseAltSvc(folly::io::Cursor& cursor,
  * @param stream The stream identifier of the DATA frame.
  * @param padding If not kNoPadding, adds 1 byte pad len and @padding pad bytes
  * @param endStream True iff this frame ends the stream.
+ * @param reuseIOBufHeadroom If HTTP2Framer should reuse headroom in data if
+ *                           headroom is enough for frame header
  * @return The number of bytes written to writeBuf.
  */
 extern size_t
 writeData(folly::IOBufQueue& writeBuf,
           std::unique_ptr<folly::IOBuf> data,
           uint32_t stream,
-          boost::optional<uint8_t> padding,
-          bool endStream) noexcept;
+          folly::Optional<uint8_t> padding,
+          bool endStream,
+          bool reuseIOBufHeadroom) noexcept;
 
 /**
- * Generate an entire HEADERS frame, including the common frame
- * header. The combined length of
- * the data buffer and the padding and priority fields MUST NOT exceed
- * 2^14 - 1, which is kMaxFramePayloadLength.
+ * Generate an entire HEADERS frame, including the common frame header. The
+ * combined length of the data buffer and the padding and priority fields MUST
+ * NOT exceed 2^14 - 1, which is kMaxFramePayloadLength.
  *
  * @param writeBuf The output queue to write to. It may grow or add
  *                 underlying buffers inside this function.
  * @param headers The encoded headers data to write out.
- * @param stream The stream identifier of the DATA frame.
+ * @param stream The stream identifier of the HEADERS frame.
  * @param priority If present, the priority depedency information to
  *                 update the stream with.
  * @param padding If not kNoPadding, adds 1 byte pad len and @padding pad bytes
@@ -359,10 +372,38 @@ extern size_t
 writeHeaders(folly::IOBufQueue& writeBuf,
              std::unique_ptr<folly::IOBuf> headers,
              uint32_t stream,
-             boost::optional<PriorityUpdate> priority,
-             boost::optional<uint8_t> padding,
+             folly::Optional<PriorityUpdate> priority,
+             folly::Optional<uint8_t> padding,
              bool endStream,
              bool endHeaders) noexcept;
+
+/**
+ * Generate an experimental ExHEADERS frame, including the common frame
+ * header. The combined length of the data buffer and the padding and priority
+ * fields MUST NOT exceed 2^14 - 1, which is kMaxFramePayloadLength.
+ *
+ * @param writeBuf The output queue to write to. It may grow or add
+ *                 underlying buffers inside this function.
+ * @param headers The encoded headers data to write out.
+ * @param stream The stream identifier of the ExHEADERS frame.
+ * @param controlStream The stream identifier of the control stream, with which
+                        this ExHEADERS associated.
+ * @param priority If present, the priority depedency information to
+ *                 update the stream with.
+ * @param padding If not kNoPadding, adds 1 byte pad len and @padding pad bytes
+ * @param endStream True iff this frame ends the stream.
+ * @param endHeaders True iff no CONTINUATION frames will follow this frame.
+ * @return The number of bytes written to writeBuf.
+ */
+extern size_t
+writeExHeaders(folly::IOBufQueue& writeBuf,
+               std::unique_ptr<folly::IOBuf> headers,
+               uint32_t stream,
+               uint32_t controlStream,
+               folly::Optional<PriorityUpdate> priority,
+               folly::Optional<uint8_t> padding,
+               bool endStream,
+               bool endHeaders) noexcept;
 
 /**
  * Generate an entire PRIORITY frame, including the common frame header.
@@ -432,7 +473,7 @@ writePushPromise(folly::IOBufQueue& writeBuf,
                  uint32_t associatedStream,
                  uint32_t promisedStream,
                  std::unique_ptr<folly::IOBuf> headers,
-                 boost::optional<uint8_t> padding,
+                 folly::Optional<uint8_t> padding,
                  bool endHeaders) noexcept;
 /**
  * Generate an entire PING frame, including the common frame header.
@@ -491,15 +532,13 @@ writeWindowUpdate(folly::IOBufQueue& writeBuf,
  * @param stream The stream identifier of the DATA frame.
  * @param endHeaders True iff more CONTINUATION frames will follow.
  * @param headers The encoded headers data to write out.
- * @param padding If not kNoPadding, adds 1 byte pad len and @padding pad bytes
  * @return The number of bytes written to writeBuf.
  */
 extern size_t
 writeContinuation(folly::IOBufQueue& queue,
                   uint32_t stream,
                   bool endHeaders,
-                  std::unique_ptr<folly::IOBuf> headers,
-                  boost::optional<uint8_t> padding) noexcept;
+                  std::unique_ptr<folly::IOBuf> headers) noexcept;
 /**
  * Generate an entire ALTSVC frame, including the common frame
  * header.

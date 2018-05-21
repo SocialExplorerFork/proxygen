@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -9,7 +9,7 @@
  */
 #include <proxygen/lib/http/HTTPMethod.h>
 
-#include <folly/Foreach.h>
+#include <folly/container/Foreach.h>
 #include <folly/Indestructible.h>
 #include <proxygen/lib/http/HTTPHeaders.h>
 #include <vector>
@@ -21,7 +21,7 @@ namespace {
 // Method strings. This is indestructible because this structure is
 // accessed from multiple threads and still needs to be accessible after exit()
 // is called to avoid crashing.
-typedef std::vector<std::string> StringVector;
+using StringVector = std::vector<std::string>;
 
 const StringVector& getMethodStrings() {
   static const folly::Indestructible<StringVector> methodStrings{
@@ -34,13 +34,13 @@ const StringVector& getMethodStrings() {
 
 namespace proxygen {
 
-boost::optional<HTTPMethod> stringToMethod(folly::StringPiece method) {
+folly::Optional<HTTPMethod> stringToMethod(folly::StringPiece method) {
   FOR_EACH_ENUMERATE(index, cur, getMethodStrings()) {
     if (caseInsensitiveEqual(*cur, method)) {
       return HTTPMethod(index);
     }
   }
-  return boost::none;
+  return folly::none;
 }
 
 const std::string& methodToString(HTTPMethod method) {

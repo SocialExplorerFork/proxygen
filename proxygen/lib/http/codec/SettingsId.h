@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -26,6 +26,14 @@ enum class SettingsId: uint32_t {
   MAX_FRAME_SIZE = 5,
   MAX_HEADER_LIST_SIZE = 6,
 
+  ENABLE_CONNECT_PROTOCOL = 8,
+
+  THRIFT_CHANNEL_ID_DEPRECATED = 100,
+
+  // 0xf000 and 0xffff being reserved for Experimental Use
+  ENABLE_EX_HEADERS = 0xfbfb,
+  THRIFT_CHANNEL_ID = 0xf100,
+
   // From SPDY, mostly unused
   _SPDY_UPLOAD_BANDWIDTH = SPDY_SETTINGS_MASK | 1,
   _SPDY_DOWNLOAD_BANDWIDTH = SPDY_SETTINGS_MASK | 2,
@@ -37,8 +45,6 @@ enum class SettingsId: uint32_t {
   _SPDY_CLIENT_CERTIFICATE_VECTOR_SIZE = SPDY_SETTINGS_MASK  | 8
 };
 
-extern const uint8_t kMaxSettingIdentifier;
-
-typedef std::pair<SettingsId, uint32_t> SettingPair;
+using SettingPair = std::pair<SettingsId, uint32_t>;
 
 }

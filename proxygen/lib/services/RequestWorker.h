@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -36,8 +36,11 @@ class RequestWorker : public WorkerThread {
    *
    * @param proxygen  The object to notify when this worker finishes.
    * @param threadId  A unique ID for this worker.
+   * @param evbName   The event base will ne named to this name (thread name)
    */
-  RequestWorker(FinishCallback& callback, uint8_t threadId);
+  RequestWorker(
+    FinishCallback& callback, uint8_t threadId,
+    const std::string& evbName = std::string());
 
   static uint64_t nextRequestId();
 

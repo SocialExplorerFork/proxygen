@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -21,6 +21,12 @@ void PassThroughHTTPCodecFilter::onPushMessageBegin(StreamID stream,
                                                     StreamID assocStream,
                                                     HTTPMessage* msg) {
   callback_->onPushMessageBegin(stream, assocStream, msg);
+}
+
+void PassThroughHTTPCodecFilter::onExMessageBegin(StreamID stream,
+                                                  StreamID controlStream,
+                                                  HTTPMessage* msg) {
+  callback_->onExMessageBegin(stream, controlStream, msg);
 }
 
 void PassThroughHTTPCodecFilter::onHeadersComplete(
@@ -59,8 +65,9 @@ void PassThroughHTTPCodecFilter::onFrameHeader(
     uint32_t stream_id,
     uint8_t flags,
     uint32_t length,
+    uint8_t type,
     uint16_t version) {
-  callback_->onFrameHeader(stream_id, flags, length, version);
+  callback_->onFrameHeader(stream_id, flags, length, type, version);
 }
 
 void PassThroughHTTPCodecFilter::onError(
@@ -125,8 +132,16 @@ uint32_t PassThroughHTTPCodecFilter::numIncomingStreams() const {
 }
 
 // PassThroughHTTPCodec methods
+HPACKTableInfo PassThroughHTTPCodecFilter::getHPACKTableInfo() const {
+  return call_->getHPACKTableInfo();
+}
+
 CodecProtocol PassThroughHTTPCodecFilter::getProtocol() const {
   return call_->getProtocol();
+}
+
+const std::string& PassThroughHTTPCodecFilter::getUserAgent() const {
+  return call_->getUserAgent();
 }
 
 TransportDirection PassThroughHTTPCodecFilter::getTransportDirection() const {
@@ -199,17 +214,35 @@ size_t PassThroughHTTPCodecFilter::generateConnectionPreface(
 void PassThroughHTTPCodecFilter::generateHeader(folly::IOBufQueue& writeBuf,
                                                 StreamID stream,
                                                 const HTTPMessage& msg,
-                                                StreamID assocStream,
                                                 bool eom,
                                                 HTTPHeaderSize* size) {
-  return call_->generateHeader(writeBuf, stream, msg, assocStream, eom, size);
+  return call_->generateHeader(writeBuf, stream, msg, eom, size);
+}
+
+void PassThroughHTTPCodecFilter::generatePushPromise(folly::IOBufQueue& buf,
+                                                     StreamID stream,
+                                                     const HTTPMessage& msg,
+                                                     StreamID assocStream,
+                                                     bool eom,
+                                                     HTTPHeaderSize* size) {
+  return call_->generatePushPromise(buf, stream, msg, assocStream, eom, size);
+}
+
+void PassThroughHTTPCodecFilter::generateExHeader(folly::IOBufQueue& writeBuf,
+                                                  StreamID stream,
+                                                  const HTTPMessage& msg,
+                                                  StreamID controlStream,
+                                                  bool eom,
+                                                  HTTPHeaderSize* size) {
+  return call_->generateExHeader(writeBuf, stream, msg, controlStream, eom,
+                                 size);
 }
 
 size_t PassThroughHTTPCodecFilter::generateBody(
     folly::IOBufQueue& writeBuf,
     StreamID stream,
     std::unique_ptr<folly::IOBuf> chain,
-    boost::optional<uint8_t> padding,
+    folly::Optional<uint8_t> padding,
     bool eom) {
   return call_->generateBody(writeBuf, stream, std::move(chain), padding,
                              eom);

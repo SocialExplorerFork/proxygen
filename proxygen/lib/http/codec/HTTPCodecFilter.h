@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -40,6 +40,9 @@ class PassThroughHTTPCodecFilter: public HTTPCodecFilter {
   void onPushMessageBegin(StreamID stream, StreamID assocStream,
                           HTTPMessage* msg) override;
 
+  void onExMessageBegin(StreamID stream, StreamID controlStream,
+                        HTTPMessage* msg) override;
+
   void onHeadersComplete(StreamID stream,
                          std::unique_ptr<HTTPMessage> msg) override;
 
@@ -59,6 +62,7 @@ class PassThroughHTTPCodecFilter: public HTTPCodecFilter {
   void onFrameHeader(uint32_t stream_id,
                      uint8_t flags,
                      uint32_t length,
+                     uint8_t type,
                      uint16_t version = 0) override;
 
   void onError(StreamID stream,
@@ -95,7 +99,11 @@ class PassThroughHTTPCodecFilter: public HTTPCodecFilter {
   uint32_t numIncomingStreams() const override;
 
   // HTTPCodec methods
+  HPACKTableInfo getHPACKTableInfo() const override;
+
   CodecProtocol getProtocol() const override;
+
+  const std::string& getUserAgent() const override;
 
   TransportDirection getTransportDirection() const override;
 
@@ -132,14 +140,27 @@ class PassThroughHTTPCodecFilter: public HTTPCodecFilter {
   void generateHeader(folly::IOBufQueue& writeBuf,
                       StreamID stream,
                       const HTTPMessage& msg,
-                      StreamID assocStream,
                       bool eom,
                       HTTPHeaderSize* size) override;
+
+  void generatePushPromise(folly::IOBufQueue& writeBuf,
+                           StreamID stream,
+                           const HTTPMessage& msg,
+                           StreamID assocStream,
+                           bool eom,
+                           HTTPHeaderSize* size) override;
+
+  void generateExHeader(folly::IOBufQueue& writeBuf,
+                        StreamID stream,
+                        const HTTPMessage& msg,
+                        StreamID controlStream,
+                        bool eom,
+                        HTTPHeaderSize* size) override;
 
   size_t generateBody(folly::IOBufQueue& writeBuf,
                       StreamID stream,
                       std::unique_ptr<folly::IOBuf> chain,
-                      boost::optional<uint8_t> padding,
+                      folly::Optional<uint8_t> padding,
                       bool eom) override;
 
   size_t generateChunkHeader(folly::IOBufQueue& writeBuf,

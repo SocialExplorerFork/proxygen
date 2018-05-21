@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -9,6 +9,7 @@
  */
 #pragma once
 
+#include <folly/Optional.h>
 #include <folly/Range.h>
 #include <proxygen/lib/http/HTTPMethod.h>
 #include <string>
@@ -35,7 +36,7 @@ enum class BodyAllowed {
   NOT_DEFINED,
   NOT_ALLOWED,
 };
-BodyAllowed isRequestBodyAllowed(boost::optional<HTTPMethod> method);
+BodyAllowed isRequestBodyAllowed(folly::Optional<HTTPMethod> method);
 
 /**
  * Some status codes imply that there MUST NOT be a response body.  See section
@@ -65,7 +66,7 @@ bool bodyImplied(const HTTPHeaders& headers);
  * Return true if the string was well formed according to the RFC.  Note it can
  * return false but still populate output with best-effort parsing.
  */
-typedef std::pair<folly::StringPiece, double> TokenQPair;
+using TokenQPair = std::pair<folly::StringPiece, double>;
 
 bool parseQvalues(folly::StringPiece value, std::vector<TokenQPair> &output);
 

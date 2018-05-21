@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -28,6 +28,11 @@ class HTTP1xCodec : public HTTPCodec {
   CodecProtocol getProtocol() const override {
     return CodecProtocol::HTTP_1_1;
   }
+
+  const std::string& getUserAgent() const override {
+    return userAgent_;
+  }
+
   TransportDirection getTransportDirection() const override {
     return transportDirection_;
   }
@@ -47,13 +52,12 @@ class HTTP1xCodec : public HTTPCodec {
   void generateHeader(folly::IOBufQueue& writeBuf,
                       StreamID txn,
                       const HTTPMessage& msg,
-                      StreamID assocStream = 0,
                       bool eom = false,
                       HTTPHeaderSize* size = nullptr) override;
   size_t generateBody(folly::IOBufQueue& writeBuf,
                       StreamID txn,
                       std::unique_ptr<folly::IOBuf> chain,
-                      boost::optional<uint8_t> padding,
+                      folly::Optional<uint8_t> padding,
                       bool eom) override;
   size_t generateChunkHeader(folly::IOBufQueue& writeBuf,
                              StreamID txn,
@@ -149,6 +153,7 @@ class HTTP1xCodec : public HTTPCodec {
   folly::StringPiece currentHeaderNameStringPiece_;
   std::string currentHeaderValue_;
   std::string url_;
+  std::string userAgent_;
   std::string reason_;
   std::string upgradeHeader_; // last sent/received client upgrade header
   std::string allowedNativeUpgrades_; // DOWNSTREAM only

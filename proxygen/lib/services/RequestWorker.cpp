@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -14,8 +14,9 @@
 
 namespace proxygen {
 
-RequestWorker::RequestWorker(FinishCallback& callback, uint8_t threadId)
-    : WorkerThread(folly::EventBaseManager::get()),
+RequestWorker::RequestWorker(
+  FinishCallback& callback, uint8_t threadId, const std::string& evbName)
+    : WorkerThread(folly::EventBaseManager::get(), evbName),
       nextRequestId_(static_cast<uint64_t>(threadId) << 56),
       callback_(callback) {
 }

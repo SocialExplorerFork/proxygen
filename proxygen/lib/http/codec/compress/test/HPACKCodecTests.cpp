@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -11,10 +11,13 @@
 #include <folly/io/Cursor.h>
 #include <folly/io/IOBuf.h>
 #include <glog/logging.h>
-#include <gtest/gtest.h>
+#include <folly/portability/GTest.h>
 #include <proxygen/lib/http/codec/compress/HPACKCodec.h>
+#include <proxygen/lib/http/codec/compress/HPACKQueue.h>
 #include <proxygen/lib/http/codec/compress/Header.h>
 #include <proxygen/lib/http/codec/compress/HeaderCodec.h>
+#include <proxygen/lib/http/codec/compress/QPACKCodec.h>
+#include <proxygen/lib/http/codec/compress/test/TestStreamingCallback.h>
 #include <vector>
 
 using namespace folly::io;
@@ -57,7 +60,7 @@ class TestHeaderCodecStats : public HeaderCodec::Stats {
 
   void recordDecodeTooLarge(HeaderCodec::Type type) override {
     EXPECT_EQ(type, HeaderCodec::Type::HPACK);
-    errors++; //?
+    tooLarge++;
   }
 
   void reset() {
@@ -68,6 +71,7 @@ class TestHeaderCodecStats : public HeaderCodec::Stats {
     decodedBytesCompr = 0;
     decodedBytesUncompr = 0;
     errors = 0;
+    tooLarge = 0;
   }
 
   uint32_t encodes{0};
@@ -77,39 +81,56 @@ class TestHeaderCodecStats : public HeaderCodec::Stats {
   uint32_t decodedBytesCompr{0};
   uint32_t decodedBytesUncompr{0};
   uint32_t errors{0};
+  uint32_t tooLarge{0};
 };
 
-class HPACKCodecTests : public testing::Test {
-
- protected:
-  vector<Header> headersFromArray(vector<vector<string>>& a) {
-    vector<Header> headers;
-    for (auto& ha : a) {
-      headers.push_back(Header(ha[0], ha[1]));
-    }
-    return headers;
+namespace {
+vector<Header> headersFromArray(vector<vector<string>>& a) {
+  vector<Header> headers;
+  for (auto& ha : a) {
+    headers.push_back(Header::makeHeaderForTest(ha[0], ha[1]));
   }
+  return headers;
+}
+
+vector<Header> basicHeaders() {
+  static vector<vector<string>> headersStrings = {
+    {":path", "/index.php"},
+    {":host", "www.facebook.com"},
+    {"accept-encoding", "gzip"}
+  };
+  static vector<Header> headers = headersFromArray(headersStrings);
+  return headers;
+}
+
+Result<HeaderDecodeResult, HeaderDecodeError>
+encodeDecode(HPACKCodec& encoder, HPACKCodec& decoder,
+             vector<Header>&& headers) {
+  unique_ptr<IOBuf> encoded = encoder.encode(headers);
+  Cursor cursor(encoded.get());
+  VLOG(10) << cursor.totalLength();
+  return decoder.decode(cursor, cursor.totalLength());
+}
+
+uint64_t bufLen(const std::unique_ptr<IOBuf>& buf) {
+  if (buf) {
+    return buf->computeChainDataLength();
+  }
+  return 0;
+}
+
+}
+
+class HPACKCodecTests : public testing::Test {
+ protected:
 
   HPACKCodec client{TransportDirection::UPSTREAM};
   HPACKCodec server{TransportDirection::DOWNSTREAM};
 };
 
 TEST_F(HPACKCodecTests, request) {
-  vector<vector<string>> headers = {
-    {":path", "/index.php"},
-    {":host", "www.facebook.com"},
-    {"accept-encoding", "gzip"}
-  };
-  vector<Header> req = headersFromArray(headers);
-
   for (int i = 0; i < 3; i++) {
-    unique_ptr<IOBuf> encodedReq = client.encode(req);
-    Cursor cursor(encodedReq.get());
-    uint32_t len = 0;
-    if (encodedReq) {
-      len = encodedReq->computeChainDataLength();
-    }
-    auto result = server.decode(cursor, len);
+    auto result = encodeDecode(client, server, basicHeaders());
     EXPECT_TRUE(result.isOk());
     EXPECT_EQ(result.ok().headers.size(), 6);
   }
@@ -124,40 +145,23 @@ TEST_F(HPACKCodecTests, response) {
   vector<Header> req = headersFromArray(headers);
 
   for (int i = 0; i < 3; i++) {
-    unique_ptr<IOBuf> encodedReq = server.encode(req);
-    Cursor cursor(encodedReq.get());
-    uint32_t len = 0;
-    if (encodedReq) {
-      len = encodedReq->computeChainDataLength();
-    }
-    auto result = client.decode(cursor, len);
+    auto result = encodeDecode(server, client, basicHeaders());
     EXPECT_TRUE(result.isOk());
     EXPECT_EQ(result.ok().headers.size(), 6);
   }
 }
 
 TEST_F(HPACKCodecTests, headroom) {
-  vector<vector<string>> headers = {
-    {":path", "/index.php"},
-    {":host", "www.facebook.com"},
-    {"accept-encoding", "gzip"}
-  };
-  vector<Header> req = headersFromArray(headers);
+  vector<Header> req = basicHeaders();
 
   uint32_t headroom = 20;
   client.setEncodeHeadroom(headroom);
-  for (int i = 0; i < 3; i++) {
-    unique_ptr<IOBuf> encodedReq = client.encode(req);
-    EXPECT_EQ(encodedReq->headroom(), headroom);
-    Cursor cursor(encodedReq.get());
-    uint32_t len = 0;
-    if (encodedReq) {
-      len = encodedReq->computeChainDataLength();
-    }
-    auto result = server.decode(cursor, len);
-    EXPECT_TRUE(result.isOk());
-    EXPECT_EQ(result.ok().headers.size(), 6);
-  }
+  unique_ptr<IOBuf> encodedReq = client.encode(req);
+  EXPECT_EQ(encodedReq->headroom(), headroom);
+  Cursor cursor(encodedReq.get());
+  auto result = server.decode(cursor, cursor.totalLength());
+  EXPECT_TRUE(result.isOk());
+  EXPECT_EQ(result.ok().headers.size(), 6);
 }
 
 /**
@@ -169,19 +173,11 @@ TEST_F(HPACKCodecTests, lowercasing_header_names) {
     {"Content-Encoding", "gzip"},
     {"X-FB-Debug", "bleah"}
   };
-  vector<Header> req = headersFromArray(headers);
-
-  unique_ptr<IOBuf> encodedReq = server.encode(req);
-  Cursor cursor(encodedReq.get());
-  uint32_t len = 0;
-  if (encodedReq) {
-    len = encodedReq->computeChainDataLength();
-  }
-  auto result = client.decode(cursor, len);
+  auto result = encodeDecode(server, client, headersFromArray(headers));
   EXPECT_TRUE(result.isOk());
   auto& decoded = result.ok().headers;
   CHECK_EQ(decoded.size(), 6);
-  for (int i = 0; i < 6; i+=2) {
+  for (int i = 0; i < 6; i += 2) {
     EXPECT_TRUE(isLowercase(decoded[i].str));
   }
 }
@@ -197,19 +193,11 @@ TEST_F(HPACKCodecTests, multivalue_headers) {
     {"X-FB-Dup", "bleah"},
     {"X-FB-Dup", "hahaha"}
   };
-  vector<Header> req = headersFromArray(headers);
-
-  unique_ptr<IOBuf> encodedReq = server.encode(req);
-  Cursor cursor(encodedReq.get());
-  uint32_t len = 0;
-  if (encodedReq) {
-    len = encodedReq->computeChainDataLength();
-  }
-  auto result = client.decode(cursor, len);
+  auto result = encodeDecode(server, client, headersFromArray(headers));
   EXPECT_TRUE(result.isOk());
   auto& decoded = result.ok().headers;
   CHECK_EQ(decoded.size(), 8);
-  for (int i = 0; i < 6; i+=2) {
+  for (int i = 0; i < 6; i += 2) {
     if (decoded[i].str == "x-fb-dup") {
       EXPECT_TRUE(decoded[i].isMultiValued());
     }
@@ -226,14 +214,12 @@ TEST_F(HPACKCodecTests, decode_error) {
   vector<Header> req = headersFromArray(headers);
 
   unique_ptr<IOBuf> encodedReq = server.encode(req);
-  // mangle the buffer to force an error
-  uint32_t len = encodedReq->computeChainDataLength();
   encodedReq->writableData()[0] = 0xFF;
   Cursor cursor(encodedReq.get());
 
   TestHeaderCodecStats stats;
   client.setStats(&stats);
-  auto result = client.decode(cursor, len);
+  auto result = client.decode(cursor, cursor.totalLength());
   // this means there was an error
   EXPECT_TRUE(result.isError());
   EXPECT_EQ(result.error(), HeaderDecodeError::BAD_ENCODING);
@@ -267,13 +253,9 @@ TEST_F(HPACKCodecTests, header_codec_stats) {
 
   // decode
   Cursor cursor(encodedResp.get());
-  uint32_t len = 0;
-  if (encodedResp) {
-    len = encodedResp->computeChainDataLength();
-  }
   stats.reset();
   client.setStats(&stats);
-  auto result = client.decode(cursor, len);
+  auto result = client.decode(cursor, cursor.totalLength());
   EXPECT_TRUE(result.isOk());
   auto& decoded = result.ok().headers;
   CHECK_EQ(decoded.size(), 3 * 2);
@@ -298,14 +280,326 @@ TEST_F(HPACKCodecTests, uncompressed_size_limit) {
     vector<string> header = {contentLength, value};
     headers.push_back(header);
   }
-  vector<Header> req = headersFromArray(headers);
-  unique_ptr<IOBuf> encoded = server.encode(req);
-  Cursor cursor(encoded.get());
-  uint32_t len = 0;
-  if (encoded) {
-    len = encoded->computeChainDataLength();
-  }
-  auto result = client.decode(cursor, len);
+  auto result = encodeDecode(server, client, headersFromArray(headers));
   EXPECT_TRUE(result.isError());
   EXPECT_EQ(result.error(), HeaderDecodeError::HEADERS_TOO_LARGE);
+}
+
+
+/**
+ * Size limit stats
+ */
+TEST_F(HPACKCodecTests, size_limit_stats) {
+  vector<vector<string>> headers;
+  // generate lots of small headers
+  string contentLength = "Content-Length";
+  for (int i = 0; i < 10000; i++) {
+    string value = folly::to<string>(i);
+    vector<string> header = {contentLength, value};
+    headers.push_back(header);
+  }
+  auto encHeaders = headersFromArray(headers);
+  unique_ptr<IOBuf> encoded = client.encode(encHeaders);
+  Cursor cursor(encoded.get());
+  TestStreamingCallback cb;
+  TestHeaderCodecStats stats;
+  server.setStats(&stats);
+  server.decodeStreaming(cursor, cursor.totalLength(), &cb);
+  auto result = cb.getResult();
+  EXPECT_TRUE(result.isError());
+  EXPECT_EQ(result.error(), HeaderDecodeError::HEADERS_TOO_LARGE);
+  EXPECT_EQ(stats.tooLarge, 1);
+}
+
+TEST_F(HPACKCodecTests, default_header_indexing_strategy) {
+  vector<Header> headers = basicHeaders();
+  size_t headersOrigSize = headers.size();
+
+  // Control equality check; all basic headers were indexed
+  client.encode(headers);
+  EXPECT_EQ(client.getHPACKTableInfo().egressHeadersStored_, headersOrigSize);
+
+  // Verify HPACKCodec by default utilizes the default header indexing strategy
+  // by ensuring that it does not index any of the added headers below
+  // The below is quite verbose but that is because Header constructors use
+  // references and so we need the actual strings to not go out of scope
+  vector<vector<string>> noIndexHeadersStrings = {
+    {"content-length", "80"},
+    {":path", "/some/random/file.jpg"},
+    {":path", "checks_for_="},
+    {"if-modified-since", "some_value"},
+    {"last-modified", "some_value"}
+  };
+  vector<Header> noIndexHeaders = headersFromArray(noIndexHeadersStrings);
+  headers.insert(headers.end(), noIndexHeaders.begin(), noIndexHeaders.end());
+  HPACKCodec testCodec{TransportDirection::UPSTREAM};
+  testCodec.encode(headers);
+  EXPECT_EQ(
+    testCodec.getHPACKTableInfo().egressHeadersStored_, headersOrigSize);
+}
+
+
+class HPACKQueueTests : public testing::TestWithParam<int> {
+ public:
+  HPACKQueueTests()
+      : queue(std::make_unique<HPACKQueue>(server)) {}
+
+ protected:
+
+  HPACKCodec client{TransportDirection::UPSTREAM};
+  HPACKCodec server{TransportDirection::DOWNSTREAM};
+  std::unique_ptr<HPACKQueue> queue;
+};
+
+TEST_F(HPACKQueueTests, queue_inline) {
+  vector<Header> req = basicHeaders();
+  TestStreamingCallback cb;
+
+  for (int i = 0; i < 3; i++) {
+    unique_ptr<IOBuf> encodedReq = client.encode(req);
+    auto len = bufLen(encodedReq);
+    cb.reset();
+    queue->enqueueHeaderBlock(i, std::move(encodedReq), len, &cb, false);
+    auto result = cb.getResult();
+    EXPECT_TRUE(result.isOk());
+    EXPECT_EQ(result.ok().headers.size(), 6);
+  }
+}
+
+TEST_F(HPACKQueueTests, queue_reorder) {
+  vector<Header> req = basicHeaders();
+  vector<std::pair<unique_ptr<IOBuf>, TestStreamingCallback>> data;
+
+  for (int i = 0; i < 4; i++) {
+    data.emplace_back(client.encode(req), TestStreamingCallback());
+  }
+
+  std::vector<int> insertOrder{1, 3, 2, 0};
+  for (auto i: insertOrder) {
+    auto& encodedReq = data[i].first;
+    auto len = bufLen(encodedReq);
+    queue->enqueueHeaderBlock(i, std::move(encodedReq), len, &data[i].second,
+                             false);
+  }
+  for (auto& d: data) {
+    auto result = d.second.getResult();
+    EXPECT_TRUE(result.isOk());
+    EXPECT_EQ(result.ok().headers.size(), 6);
+  }
+  EXPECT_EQ(queue->getHolBlockCount(), 3);
+}
+
+TEST_F(HPACKQueueTests, queue_reorder_ooo) {
+  vector<Header> req = basicHeaders();
+  vector<std::pair<unique_ptr<IOBuf>, TestStreamingCallback>> data;
+
+  for (int i = 0; i < 4; i++) {
+    data.emplace_back(client.encode(req), TestStreamingCallback());
+  }
+
+  std::vector<int> insertOrder{0, 3, 2, 1};
+  for (auto i: insertOrder) {
+    auto& encodedReq = data[i].first;
+    auto len = bufLen(encodedReq);
+    // Allow idx 3 to be decoded out of order
+    queue->enqueueHeaderBlock(i, std::move(encodedReq), len, &data[i].second,
+                              i == 3);
+  }
+  for (auto& d: data) {
+    auto result = d.second.getResult();
+    EXPECT_TRUE(result.isOk());
+    EXPECT_EQ(result.ok().headers.size(), 6);
+  }
+  EXPECT_EQ(queue->getHolBlockCount(), 1);
+}
+
+TEST_F(HPACKQueueTests, queue_error) {
+  vector<Header> req = basicHeaders();
+  TestStreamingCallback cb;
+
+  bool expectOk = true;
+  // ok, dup, ok, lower
+  for (auto i: std::vector<int>({0, 0, 1, 0, 3, 3, 2})) {
+    unique_ptr<IOBuf> encodedReq = client.encode(req);
+    auto len = bufLen(encodedReq);
+    cb.reset();
+    queue->enqueueHeaderBlock(i, std::move(encodedReq), len, &cb, true);
+    auto result = cb.getResult();
+    if (expectOk) {
+      EXPECT_TRUE(result.isOk());
+      EXPECT_EQ(result.ok().headers.size(), 6);
+    } else {
+      EXPECT_TRUE(result.isError());
+      EXPECT_EQ(result.error(), HeaderDecodeError::BAD_SEQUENCE_NUMBER);
+    }
+    expectOk = !expectOk;
+  }
+}
+
+TEST_P(HPACKQueueTests, queue_deleted) {
+  vector<Header> req = basicHeaders();
+  vector<std::pair<unique_ptr<IOBuf>, TestStreamingCallback>> data;
+
+  for (int i = 0; i < 4; i++) {
+    data.emplace_back(client.encode(req), TestStreamingCallback());
+    if (i == GetParam()) {
+      data.back().second.headersCompleteCb = [&] { queue.reset(); };
+    }
+  }
+
+  std::vector<int> insertOrder{0, 3, 2, 1};
+  for (auto i: insertOrder) {
+    auto& encodedReq = data[i].first;
+    auto len = bufLen(encodedReq);
+
+    // Allow idx 3 to be decoded out of order
+    queue->enqueueHeaderBlock(i, std::move(encodedReq), len, &data[i].second,
+                             i == 3);
+    if (!queue) {
+      break;
+    }
+  }
+}
+
+INSTANTIATE_TEST_CASE_P(Queue,
+                        HPACKQueueTests,
+                        ::testing::Values(0, 1, 2, 3));
+
+
+void headersEq(vector<Header>& headerVec, compress::HeaderPieceList& headers) {
+  size_t i = 0;
+  EXPECT_EQ(headerVec.size() * 2, headers.size());
+  for (auto& h: headerVec) {
+    string name = *h.name;
+    char *mutableName = (char *)name.data();
+    folly::toLowerAscii(mutableName, name.size());
+    EXPECT_EQ(name, headers[i++].str);
+    EXPECT_EQ(*h.value, headers[i++].str);
+  }
+}
+
+class QPACKTests : public testing::Test {
+ public:
+
+ protected:
+
+  QPACKCodec client{TransportDirection::UPSTREAM};
+  QPACKCodec server{TransportDirection::DOWNSTREAM};
+};
+
+TEST_F(QPACKTests, test_simple) {
+  vector<Header> req = basicHeaders();
+  auto encodeResult = client.encode(req, 1);
+  ASSERT_NE(encodeResult.control.get(), nullptr);
+  Cursor cCursor(encodeResult.control.get());
+  EXPECT_EQ(server.decodeControl(cCursor, cCursor.totalLength()),
+            HPACK::DecodeError::NONE);
+  client.onControlHeaderAck();
+  TestStreamingCallback cb;
+  auto length = encodeResult.stream->computeChainDataLength();
+  server.decodeStreaming(std::move(encodeResult.stream), length, &cb);
+  client.onHeaderAck(1);
+  auto result = cb.getResult();
+  EXPECT_TRUE(result.isOk());
+  headersEq(req, result.ok().headers);
+}
+
+TEST_F(QPACKTests, test_absolute_index) {
+  int flights = 10;
+  for (int i = 0; i < flights; i++) {
+    vector<vector<string>> headers;
+    for (int j = 0; j < 32; j++) {
+      int value = (i >> 1) * 32 + j; // duplicate the last flight
+      headers.emplace_back(
+        vector<string>({string("foomonkey"), folly::to<string>(value)}));
+    }
+    auto req = headersFromArray(headers);
+    auto encodeResult = client.encode(req, i + 1);
+    Cursor cCursor(encodeResult.control.get());
+    if (i % 2 == 1) {
+      EXPECT_EQ(encodeResult.control.get(), nullptr);
+    } else {
+      ASSERT_NE(encodeResult.control.get(), nullptr);
+      CHECK_EQ(server.decodeControl(cCursor, cCursor.totalLength()),
+               HPACK::DecodeError::NONE);
+      client.onControlHeaderAck();
+    }
+    TestStreamingCallback cb;
+    auto length = encodeResult.stream->computeChainDataLength();
+    server.decodeStreaming(std::move(encodeResult.stream), length, &cb);
+    client.onHeaderAck(i + 1);
+    auto result = cb.getResult();
+    EXPECT_TRUE(result.isOk());
+    headersEq(req, result.ok().headers);
+  }
+}
+
+TEST_F(QPACKTests, test_with_queue) {
+  // Sends 10 flights of 4 requests each
+  // Each request contains two 'connection' headers, one with the current
+  // index, and current index - 8.
+  // Each flight is processed in the order 0, 3, 2, 1, unless an eviction
+  // happens on 2 or 3, in which case we force an blocking event.
+  vector<Header> req = basicHeaders();
+  vector<string> values;
+  int flights = 10;
+  for (auto i = 0; i < flights * 4; i++) {
+    values.push_back(folly::to<string>(i));
+  }
+  client.setEncoderHeaderTableSize(1024);
+  for (auto f = 0; f < flights; f++) {
+    vector<std::pair<unique_ptr<IOBuf>, TestStreamingCallback>> data;
+    list<unique_ptr<IOBuf>> controlFrames;
+    for (int i = 0; i < 4; i++) {
+      auto reqI = req;
+      for (int j = 0; j < 2; j++) {
+        reqI.emplace_back(HTTP_HEADER_CONNECTION, values[
+                            std::max(f * 4 + i - j * 8, 0)]);
+      }
+      VLOG(4) << "Encoding req=" << f * 4 + i;
+      auto res = client.encode(reqI, f * 4 + i);
+      if (res.control && res.control->computeChainDataLength() > 0) {
+        controlFrames.emplace_back(std::move(res.control));
+      }
+      data.emplace_back(std::move(res.stream), TestStreamingCallback());
+    }
+
+    std::vector<int> insertOrder{0, 3, 2, 1};
+    if (!controlFrames.empty()) {
+      auto control = std::move(controlFrames.front());
+      controlFrames.pop_front();
+      Cursor c(control.get());
+      server.decodeControl(c, c.totalLength());
+      client.onControlHeaderAck();
+    }
+    for (auto i: insertOrder) {
+      auto& encodedReq = data[i].first;
+      auto len = encodedReq->computeChainDataLength();
+      server.decodeStreaming(std::move(encodedReq), len, &data[i].second);
+    }
+    while (!controlFrames.empty()) {
+      auto control = std::move(controlFrames.front());
+      controlFrames.pop_front();
+      Cursor c(control.get());
+      server.decodeControl(c, c.totalLength());
+      client.onControlHeaderAck();
+    }
+    int i = 0;
+    for (auto& d: data) {
+      auto result = d.second.getResult();
+      EXPECT_TRUE(result.isOk());
+      auto reqI = req;
+      for (int j = 0; j < 2; j++) {
+        reqI.emplace_back(HTTP_HEADER_CONNECTION,
+                          values[std::max(f * 4 + i - j * 8, 0)]);
+      }
+      headersEq(reqI, result.ok().headers);
+      client.onHeaderAck(f * 4 + i);
+      i++;
+    }
+    VLOG(4) << "getHolBlockCount=" << server.getHolBlockCount();
+  }
+  // Skipping redundant table adds reduces the HOL block count
+  EXPECT_EQ(server.getHolBlockCount(), 30);
+
 }

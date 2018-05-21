@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -28,7 +28,8 @@ namespace proxygen {
  */
 class WorkerThread {
  public:
-  explicit WorkerThread(folly::EventBaseManager* ebm);
+  explicit WorkerThread(
+    folly::EventBaseManager* ebm, const std::string& evbName = std::string());
   virtual ~WorkerThread();
 
   /**
@@ -122,9 +123,6 @@ class WorkerThread {
 
   // A thread-local pointer to the current WorkerThread for this thread
   static FOLLY_TLS WorkerThread* currentWorker_;
-
-  // A count of the number of WorkerThreads that have been constructed
-  static std::atomic_uint objectCounter_;
 };
 
 } // proxygen

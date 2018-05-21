@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -10,6 +10,7 @@
 #pragma once
 
 #include <folly/Memory.h>
+#include <folly/Function.h>
 #include <glog/logging.h>
 #include <memory>
 #include <utility>
@@ -38,7 +39,7 @@ template <typename T1, typename T2, void (T1::*set_callback)(T2*),
           bool TakeOwnership, typename Dp = std::default_delete<T1> >
 class GenericFilter: public T1, public T2 {
  public:
-  typedef GenericFilter<T1, T2, set_callback, TakeOwnership, Dp> Filter;
+  using Filter = GenericFilter<T1, T2, set_callback, TakeOwnership, Dp>;
   /**
    * @param calls You will intercept calls to T1 interface iff you
    *              pass true for this parameter.
@@ -246,13 +247,16 @@ class FilterChain: private FilterType {
   }
 
   /**
-   * Returns the concrete implementation at the end of the filter chain.
-   */
+  * Returns the concrete implementation at the end of the filter chain.
+  */
+  T1* getChainEndPtr() {
+    return chainEnd_;
+  }
   const T1& getChainEnd() const {
     return *chainEnd_;
   }
 
-  typedef GenericFilter<T1, T2, set_callback, TakeOwnership> FilterChainType;
+  using FilterChainType = GenericFilter<T1, T2, set_callback, TakeOwnership>;
   std::unique_ptr<T1> setDestination(std::unique_ptr<T1> destination) {
     static_assert(TakeOwnership, "unique_ptr setDestination only available "
                   "if the chain owns the filters.");
@@ -294,7 +298,7 @@ class FilterChain: private FilterType {
    * Adds filters with the given types to the front of the chain.
    */
   template<typename C, typename C2, typename... Types>
-  std::enable_if<std::is_constructible<C>::value> addFilters() {
+  typename std::enable_if<std::is_constructible<C>::value>::type addFilters() {
     // Callback <-> F1 <-> F2 ... <-> F_new <-> Destination
     this->append(new C());
     addFilters<C2, Types...>();
@@ -304,7 +308,7 @@ class FilterChain: private FilterType {
    * Base case of above function where we add a single filter.
    */
   template<typename C>
-  std::enable_if<std::is_constructible<C>::value> addFilters() {
+  typename std::enable_if<std::is_constructible<C>::value>::type addFilters() {
     this->append(new C());
   }
 
@@ -341,6 +345,15 @@ class FilterChain: private FilterType {
 
   const T1* operator->() const { return call(); }
   T1* operator->() { return call(); }
+
+  void foreach(folly::FunctionRef<void(FilterChainType*)> fn) {
+    auto cur = this->next_;
+    while (cur) {
+      auto filter = cur;
+      cur = cur->next_;
+      fn(filter);
+    }
+  }
 
  private:
   /**

@@ -22,6 +22,7 @@ nobase_libproxygenhttp_HEADERS = \
 	HTTPMessageFilters.h \
 	HTTPMethod.h \
 	ProxygenErrorEnum.h \
+	experimental/RFC1867.h \
 	RFC2616.h \
 	Window.h \
 	codec/CodecDictionaries.h \
@@ -44,28 +45,32 @@ nobase_libproxygenhttp_HEADERS = \
 	codec/SettingsId.h \
 	codec/TransportDirection.h \
 	codec/compress/GzipHeaderCodec.h \
+	codec/compress/HeaderIndexingStrategy.h \
 	codec/compress/HPACKCodec.h \
 	codec/compress/HPACKConstants.h \
 	codec/compress/HPACKContext.h \
 	codec/compress/HPACKDecodeBuffer.h \
 	codec/compress/HPACKDecoder.h \
+	codec/compress/HPACKDecoderBase.h \
 	codec/compress/HPACKEncodeBuffer.h \
 	codec/compress/HPACKEncoder.h \
+	codec/compress/HPACKEncoderBase.h \
 	codec/compress/HPACKHeader.h \
+	codec/compress/HPACKHeaderName.h \
+        codec/compress/HPACKTableInfo.h \
 	codec/compress/Header.h \
 	codec/compress/HeaderCodec.h \
 	codec/compress/HeaderPiece.h \
 	codec/compress/HeaderTable.h \
 	codec/compress/Huffman.h \
 	codec/compress/Logging.h \
+	codec/compress/NoPathIndexingStrategy.h \
+	codec/compress/QPACKCodec.h \
+	codec/compress/QPACKContext.h \
+	codec/compress/QPACKDecoder.h \
+	codec/compress/QPACKEncoder.h \
+	codec/compress/QPACKHeaderTable.h \
 	codec/compress/StaticHeaderTable.h \
-	codec/compress/experimental/hpack9/HPACKCodec.h \
-	codec/compress/experimental/hpack9/HPACKConstants.h \
-	codec/compress/experimental/hpack9/HPACKContextImpl.h \
-	codec/compress/experimental/hpack9/HPACKDecoder.h \
-	codec/compress/experimental/hpack9/HPACKEncoder.h \
-	codec/compress/experimental/hpack9/Huffman.h \
-	codec/compress/experimental/hpack9/StaticHeaderTable.h \
 	codec/HTTPRequestVerifier.h \
 	codec/HTTP2Codec.h \
 	codec/HTTP2Constants.h \
@@ -81,6 +86,7 @@ nobase_libproxygenhttp_HEADERS = \
 	session/HTTPEvent.h \
 	session/HTTPSession.h \
 	session/HTTPSessionAcceptor.h \
+	session/HTTPSessionBase.h \
 	session/HTTPSessionController.h \
 	session/HTTPSessionStats.h \
 	session/HTTPTransaction.h \
@@ -96,22 +102,26 @@ libproxygenhttp_la_SOURCES = \
 	HTTPCommonHeaders.cpp \
 	codec/CodecProtocol.cpp \
 	codec/compress/GzipHeaderCodec.cpp \
+	codec/compress/HeaderIndexingStrategy.cpp \
 	codec/compress/HeaderTable.cpp \
 	codec/compress/HPACKCodec.cpp \
 	codec/compress/HPACKContext.cpp \
 	codec/compress/HPACKDecodeBuffer.cpp \
 	codec/compress/HPACKDecoder.cpp \
+	codec/compress/HPACKDecoderBase.cpp \
 	codec/compress/HPACKEncodeBuffer.cpp \
 	codec/compress/HPACKEncoder.cpp \
+	codec/compress/HPACKEncoderBase.cpp \
 	codec/compress/HPACKHeader.cpp \
 	codec/compress/Huffman.cpp \
+	codec/compress/NoPathIndexingStrategy.cpp \
 	codec/compress/Logging.cpp \
+	codec/compress/QPACKCodec.cpp \
+	codec/compress/QPACKContext.cpp \
+	codec/compress/QPACKDecoder.cpp \
+	codec/compress/QPACKEncoder.cpp \
+	codec/compress/QPACKHeaderTable.cpp \
 	codec/compress/StaticHeaderTable.cpp \
-	codec/compress/experimental/hpack9/HPACKCodec.cpp \
-	codec/compress/experimental/hpack9/HPACKDecoder.cpp \
-	codec/compress/experimental/hpack9/HPACKEncoder.cpp \
-	codec/compress/experimental/hpack9/Huffman.cpp \
-	codec/compress/experimental/hpack9/StaticHeaderTable.cpp \
 	codec/ErrorCode.cpp \
 	codec/HTTP2Codec.cpp \
 	codec/HTTP2Constants.cpp \
@@ -127,7 +137,6 @@ libproxygenhttp_la_SOURCES = \
 	codec/HTTPParallelCodec.cpp \
 	codec/SPDYConstants.cpp \
 	codec/SPDYUtil.cpp \
-	codec/SettingsId.cpp \
 	codec/TransportDirection.cpp \
 	HTTPConnector.cpp \
 	HTTPConstants.cpp \
@@ -136,6 +145,7 @@ libproxygenhttp_la_SOURCES = \
 	HTTPMessage.cpp \
 	HTTPMethod.cpp \
 	ProxygenErrorEnum.cpp \
+	experimental/RFC1867.cpp \
 	RFC2616.cpp \
 	session/ByteEvents.cpp \
 	session/CodecErrorResponseHandler.cpp \
@@ -145,6 +155,7 @@ libproxygenhttp_la_SOURCES = \
 	session/HTTPErrorPage.cpp \
 	session/HTTPEvent.cpp \
 	session/HTTPSessionAcceptor.cpp \
+	session/HTTPSessionBase.cpp \
 	session/HTTPSession.cpp \
 	session/HTTPTransaction.cpp \
 	session/HTTPTransactionEgressSM.cpp \
@@ -159,3 +170,24 @@ libproxygenhttp_la_SOURCES = \
 libproxygenhttp_la_LIBADD = \
 	../services/libproxygenservices.la \
 	../utils/libutils.la
+
+noinst_PROGRAMS = CompressionSimulator
+
+CompressionSimulator_SOURCES = \
+	codec/compress/test/HTTPArchive.cpp \
+	codec/compress/experimental/simulator/Main.cpp \
+	codec/compress/experimental/simulator/CompressionSimulator.cpp
+
+CompressionSimulatordir = $(includedir)/proxygen/lib/http/codec/compress/experimental/simulator
+CompressionSimulator_HEADERS = \
+	codec/compress/test/HTTPArchive.h \
+	codec/compress/experimental/simulator/CompressionScheme.h \
+	codec/compress/experimental/simulator/CompressionSimulator.h \
+	codec/compress/experimental/simulator/CompressionTypes.h \
+	codec/compress/experimental/simulator/HPACKScheme.h \
+	codec/compress/experimental/simulator/QPACKScheme.h \
+	codec/compress/experimental/simulator/SimStreamingCallback.h
+
+CompressionSimulator_LDADD = \
+	libproxygenhttp.la \
+	../services/libproxygenservices.la

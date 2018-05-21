@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -13,6 +13,7 @@
 
 namespace proxygen {
 
+class ExMessageHandler;
 class RequestHandler;
 class PushHandler;
 
@@ -76,13 +77,24 @@ class ResponseHandler {
   virtual ResponseHandler* newPushedResponse(
     PushHandler* pushHandler) noexcept = 0;
 
+  virtual ResponseHandler* newExMessage(ExMessageHandler* /*exHandler*/)
+      noexcept {
+    LOG(FATAL) << "newExMessage not supported";
+  }
+
   // Accessors for Transport/Connection information
-  virtual const wangle::TransportInfo& getSetupTransportInfo() const noexcept = 0;
+  virtual const wangle::TransportInfo& getSetupTransportInfo() const
+      noexcept = 0;
 
   virtual void getCurrentTransportInfo(wangle::TransportInfo* tinfo) const = 0;
 
+  HTTPTransaction* getTransaction() const noexcept {
+    return txn_;
+  }
+
  protected:
   RequestHandler* upstream_{nullptr};
+  HTTPTransaction* txn_{nullptr};
 };
 
 }

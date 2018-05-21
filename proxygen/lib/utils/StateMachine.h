@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -10,14 +10,13 @@
 #pragma once
 
 #include <glog/logging.h>
-#include <iostream>
 #include <tuple>
 
 template <typename T>
 class StateMachine {
  public:
-  typedef typename T::State State;
-  typedef typename T::Event Event;
+  using State = typename T::State;
+  using Event = typename T::Event;
 
   static State getNewInstance() {
     return T::getInitialState();
@@ -29,12 +28,15 @@ class StateMachine {
 
     std::tie(newState, ok) = T::find(state, event);
     if (!ok) {
-      LOG(ERROR) << "Invalid transition tried: " << state << " " << event;
+      LOG(ERROR) << T::getName() << ": invalid transition tried: " << state
+                 << " " << event;
       return false;
+    } else {
+      VLOG(6) << T::getName() << ": transitioning from " << state << " to "
+              << newState;
+      state = newState;
+      return true;
     }
-    VLOG(6) << "Transitioning from " << state << " to " << newState;
-    state = newState;
-    return true;
   }
 
   static bool canTransit(const State state, Event event) {

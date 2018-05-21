@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -13,6 +13,8 @@
 #include <chrono>
 #include <cinttypes>
 #include <string>
+
+#include <folly/portability/Time.h>
 
 #include <openssl/ossl_typ.h>
 
@@ -69,6 +71,14 @@ inline std::chrono::milliseconds millisecondsSinceEpoch(TimePoint t) {
 inline std::chrono::seconds secondsSinceEpoch(TimePoint t) {
   return std::chrono::duration_cast<std::chrono::seconds>(
     toSystemTimePoint(t).time_since_epoch());
+}
+
+template <typename ClockType = SteadyClock>
+inline std::chrono::microseconds microsecondsBetween(
+    std::chrono::time_point<ClockType> finish,
+    std::chrono::time_point<ClockType> start) {
+  return std::chrono::duration_cast<std::chrono::microseconds>(
+    finish - start);
 }
 
 template <typename ClockType = SteadyClock>

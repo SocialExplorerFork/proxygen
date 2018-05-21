@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -63,7 +63,7 @@ ErrorCode goawayToErrorCode(GoawayStatusCode code) {
   return ErrorCode::PROTOCOL_ERROR;
 }
 
-ErrorCode rstToErrorCode(ResetStatusCode code) {
+ErrorCode rstToErrorCode(uint32_t code) {
   switch (code) {
     case RST_PROTOCOL_ERROR: break;
     case RST_INVALID_STREAM: return ErrorCode::_SPDY_INVALID_STREAM;
@@ -80,7 +80,7 @@ ErrorCode rstToErrorCode(ResetStatusCode code) {
   return ErrorCode::PROTOCOL_ERROR;
 }
 
-boost::optional<proxygen::spdy::SettingsId> httpToSpdySettingsId(
+folly::Optional<proxygen::spdy::SettingsId> httpToSpdySettingsId(
   proxygen::SettingsId id) {
   switch (id) {
     // no mapping
@@ -88,7 +88,9 @@ boost::optional<proxygen::spdy::SettingsId> httpToSpdySettingsId(
     case proxygen::SettingsId::ENABLE_PUSH:
     case proxygen::SettingsId::MAX_FRAME_SIZE:
     case proxygen::SettingsId::MAX_HEADER_LIST_SIZE:
-      return boost::none;
+      return folly::none;
+    case proxygen::SettingsId::ENABLE_EX_HEADERS:
+      return folly::none;
     case proxygen::SettingsId::MAX_CONCURRENT_STREAMS:
       return SETTINGS_MAX_CONCURRENT_STREAMS;
     case proxygen::SettingsId::INITIAL_WINDOW_SIZE:
@@ -105,11 +107,16 @@ boost::optional<proxygen::spdy::SettingsId> httpToSpdySettingsId(
       return SETTINGS_DOWNLOAD_RETRANS_RATE;
     case proxygen::SettingsId::_SPDY_CLIENT_CERTIFICATE_VECTOR_SIZE:
       return SETTINGS_CLIENT_CERTIFICATE_VECTOR_SIZE;
+    case proxygen::SettingsId::ENABLE_CONNECT_PROTOCOL:
+      return folly::none;
+    case proxygen::SettingsId::THRIFT_CHANNEL_ID_DEPRECATED:
+    case proxygen::SettingsId::THRIFT_CHANNEL_ID:
+      return folly::none;
   }
-  return boost::none;
+  return folly::none;
 }
 
-boost::optional<proxygen::SettingsId> spdyToHttpSettingsId(
+folly::Optional<proxygen::SettingsId> spdyToHttpSettingsId(
   proxygen::spdy::SettingsId id) {
   switch (id) {
     case SETTINGS_UPLOAD_BANDWIDTH:
@@ -119,20 +126,19 @@ boost::optional<proxygen::SettingsId> spdyToHttpSettingsId(
     case SETTINGS_DOWNLOAD_RETRANS_RATE:
     case SETTINGS_CLIENT_CERTIFICATE_VECTOR_SIZE:
       // These mappings are possible, but not needed right now
-      return boost::none;
+      return folly::none;
     case SETTINGS_MAX_CONCURRENT_STREAMS:
       return proxygen::SettingsId::MAX_CONCURRENT_STREAMS;
     case SETTINGS_INITIAL_WINDOW_SIZE:
       return proxygen::SettingsId::INITIAL_WINDOW_SIZE;
   }
-  return boost::none;
+  return folly::none;
 }
 
 const uint32_t kInitialWindow = 65536;
 const uint32_t kMaxConcurrentStreams = 100;
 const uint32_t kMaxFrameLength = (1 << 24) - 1;
 
-const std::string kSessionProtoNameSPDY2("spdy/2");
 const std::string kSessionProtoNameSPDY3("spdy/3");
 
 const std::string httpVersion("HTTP/1.1");

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 ## Run this script to build proxygen and run the tests. If you want to
 ## install proxygen to use in another C++ project on this machine, run
@@ -19,14 +19,18 @@ shift
 done
 
 set -e
-start_dir=`pwd`
-trap "cd $start_dir" EXIT
+start_dir=$(pwd)
+trap 'cd $start_dir' EXIT
+
+folly_rev=$(sed 's/Subproject commit //' "$start_dir"/../build/deps/github_hashes/facebook/folly-rev.txt)
+wangle_rev=$(sed 's/Subproject commit //' "$start_dir"/../build/deps/github_hashes/facebook/wangle-rev.txt)
 
 # Must execute from the directory containing this script
 cd "$(dirname "$0")"
 
 # Some extra dependencies for Ubuntu 13.10 and 14.04
 sudo apt-get install -yq \
+    git \
     cmake \
     g++ \
     flex \
@@ -55,11 +59,12 @@ then
   if [ ! -e google-glog ]; then
     echo "fetching glog from svn (apt-get failed)"
     svn checkout https://google-glog.googlecode.com/svn/trunk/ google-glog
-    cd google-glog
-    ./configure
-    make
-    sudo make install
-    cd ..
+    (
+      cd google-glog
+      ./configure
+      make
+      sudo make install
+    )
   fi
 fi
 
@@ -68,11 +73,12 @@ then
   if [ ! -e google-gflags ]; then
     echo "Fetching gflags from svn (apt-get failed)"
     svn checkout https://google-gflags.googlecode.com/svn/trunk/ google-gflags
-    cd google-gflags
-    ./configure
-    make
-    sudo make install
-    cd ..
+    (
+      cd google-gflags
+      ./configure
+      make
+      sudo make install
+    )
   fi
 fi
 
@@ -80,11 +86,12 @@ if  ! sudo apt-get install -y libdouble-conversion-dev;
 then
   if [ ! -e double-conversion ]; then
     echo "Fetching double-conversion from git (apt-get failed)"
-    git clone https://github.com/SocialExplorerFork/double-conversion.git double-conversion
-    cd double-conversion
-    cmake . -DBUILD_SHARED_LIBS=ON
-    sudo make install
-    cd ..
+    git clone https://github.com/floitsch/double-conversion.git double-conversion
+    (
+      cd double-conversion
+      cmake . -DBUILD_SHARED_LIBS=ON
+      sudo make install
+    )
   fi
 fi
 
@@ -94,13 +101,14 @@ if [ ! -e folly/folly ]; then
     echo "Cloning folly"
     git clone https://github.com/SocialExplorerFork/folly
 fi
-cd folly/folly
+cd folly
 git fetch
-git checkout master
+git checkout "$folly_rev"
 
 # Build folly
-autoreconf --install
-./configure
+mkdir -p _build
+cd _build
+cmake configure .. -DBUILD_SHARED_LIBS=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON
 make -j$JOBS
 sudo make install
 
@@ -115,12 +123,14 @@ if [ ! -e wangle/wangle ]; then
     echo "Cloning wangle"
     git clone https://github.com/SocialExplorerFork/wangle
 fi
-cd wangle/wangle
+cd wangle
 git fetch
-git checkout master
+git checkout "$wangle_rev"
 
 # Build wangle
-cmake .
+mkdir -p _build
+cd _build
+cmake configure ../wangle -DBUILD_SHARED_LIBS=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON
 make -j$JOBS
 sudo make install
 
@@ -132,7 +142,7 @@ cd ../..
 
 # Build proxygen
 autoreconf -ivf
-./configure CXXFLAGS='-std=c++14' CPPFLAGS='-std=c++14'
+./configure
 make -j$JOBS
 
 # Run tests

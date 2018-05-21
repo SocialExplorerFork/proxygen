@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -36,7 +36,7 @@ class RequestHandlerFactory {
   /**
    * Invoked for each new request server handles. HTTPMessage is provided
    * so that user can potentially choose among several implementation of
-   * handler based on URL or something. No, need to save/copy this
+   * handler based on URL or something. No need to save/copy this
    * HTTPMessage. RequestHandler will be given the HTTPMessage
    * in a separate callback.
    *
@@ -60,7 +60,7 @@ class RequestHandlerChain {
 
   template <typename T, typename... Args>
   RequestHandlerChain& addThen(Args&&... args) {
-    chain_.push_back(folly::make_unique<T>(std::forward<Args>(args)...));
+    chain_.push_back(std::make_unique<T>(std::forward<Args>(args)...));
     return *this;
   }
 

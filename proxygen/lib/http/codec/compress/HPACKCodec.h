@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -13,7 +13,9 @@
 #include <proxygen/lib/http/codec/TransportDirection.h>
 #include <proxygen/lib/http/codec/compress/HPACKDecoder.h>
 #include <proxygen/lib/http/codec/compress/HPACKEncoder.h>
+#include <proxygen/lib/http/codec/compress/HeaderIndexingStrategy.h>
 #include <proxygen/lib/http/codec/compress/HeaderCodec.h>
+#include <proxygen/lib/http/codec/compress/HPACKTableInfo.h>
 #include <string>
 #include <vector>
 
@@ -25,19 +27,18 @@ namespace proxygen {
 
 class HPACKHeader;
 
+namespace compress {
+std::pair<std::vector<HPACKHeader>, uint32_t> prepareHeaders(
+    std::vector<Header>& headers);
+}
+
 /*
  * Current version of the wire protocol. When we're making changes to the wire
  * protocol we need to change this version and the NPN string so that old
  * clients will not be able to negotiate it anymore.
- *
- * Current version: 0.5
- * Spec: tools.ietf.org/html/draft-ietf-httpbis-header-compression-05
- *
- * Note: 0 means draft, 5 for draft version
  */
-extern const std::string kHpackNpn; // NPN string for SPDY w/ HPACK
 
-class HPACKCodec : public HeaderCodec, HeaderCodec::StreamingCallback {
+class HPACKCodec : public HeaderCodec {
  public:
   explicit HPACKCodec(TransportDirection direction);
   ~HPACKCodec() override {}
@@ -48,30 +49,51 @@ class HPACKCodec : public HeaderCodec, HeaderCodec::StreamingCallback {
   Result<HeaderDecodeResult, HeaderDecodeError>
   decode(folly::io::Cursor& cursor, uint32_t length) noexcept override;
 
-  // Callbacks that handle Codec-level stats and errors
-  void onHeader(const std::string& name, const std::string& value) override;
-  void onHeadersComplete() override;
-  void onDecodeError(HeaderDecodeError decodeError) override;
-
   void decodeStreaming(
-      folly::io::Cursor& cursor,
-      uint32_t length,
-      HeaderCodec::StreamingCallback* streamingCb) noexcept override;
+    folly::io::Cursor& cursor,
+    uint32_t length,
+    HeaderCodec::StreamingCallback* streamingCb) noexcept override;
 
   void setEncoderHeaderTableSize(uint32_t size) {
-    encoder_->setHeaderTableSize(size);
+    encoder_.setHeaderTableSize(size);
   }
 
   void setDecoderHeaderTableMaxSize(uint32_t size) {
-    decoder_->setHeaderTableMaxSize(size);
+    decoder_.setHeaderTableMaxSize(size);
+  }
+
+  void describe(std::ostream& os) const;
+
+  void setMaxUncompressed(uint32_t maxUncompressed) override {
+    HeaderCodec::setMaxUncompressed(maxUncompressed);
+    decoder_.setMaxUncompressed(maxUncompressed);
+  }
+
+  HPACKTableInfo getHPACKTableInfo() const {
+    return HPACKTableInfo(encoder_.getTableSize(),
+                          encoder_.getBytesStored(),
+                          encoder_.getHeadersStored(),
+                          decoder_.getTableSize(),
+                          decoder_.getBytesStored(),
+                          decoder_.getHeadersStored());
+  }
+
+  void setHeaderIndexingStrategy(const HeaderIndexingStrategy* indexingStrat) {
+    encoder_.setHeaderIndexingStrategy(indexingStrat);
+  }
+  const HeaderIndexingStrategy* getHeaderIndexingStrategy() const {
+    return encoder_.getHeaderIndexingStrategy();
   }
 
  protected:
-  std::unique_ptr<HPACKEncoder> encoder_;
-  std::unique_ptr<HPACKDecoder> decoder_;
+  HPACKEncoder encoder_;
+  HPACKDecoder decoder_;
 
  private:
+  void recordCompressedSize(const folly::IOBuf* buf);
+
   std::vector<HPACKHeader> decodedHeaders_;
 };
 
+std::ostream& operator<<(std::ostream& os, const HPACKCodec& codec);
 }

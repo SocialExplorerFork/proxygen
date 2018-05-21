@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -9,8 +9,7 @@
  */
 #pragma once
 
-#include <iostream>
-#include <map>
+#include <iosfwd>
 #include <proxygen/lib/utils/StateMachine.h>
 
 namespace proxygen {
@@ -47,6 +46,10 @@ class HTTPTransactionEgressSMData {
   }
 
   static std::pair<State, bool> find(State s, Event e);
+
+  static const std::string getName() {
+    return "HTTPTransactionEgress";
+  }
 };
 
 std::ostream& operator<<(std::ostream& os,
@@ -55,6 +58,6 @@ std::ostream& operator<<(std::ostream& os,
 std::ostream& operator<<(std::ostream& os,
                          HTTPTransactionEgressSMData::Event e);
 
-typedef StateMachine<HTTPTransactionEgressSMData> HTTPTransactionEgressSM;
+using HTTPTransactionEgressSM = StateMachine<HTTPTransactionEgressSMData>;
 
 }

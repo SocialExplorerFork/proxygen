@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -40,12 +40,12 @@ bool strtoulWrapper(const char *&curs, const char *end, unsigned long& val) {
 
 namespace proxygen { namespace RFC2616 {
 
-BodyAllowed isRequestBodyAllowed(boost::optional<HTTPMethod> method) {
+BodyAllowed isRequestBodyAllowed(folly::Optional<HTTPMethod> method) {
   if (method == HTTPMethod::TRACE) {
     return BodyAllowed::NOT_ALLOWED;
   }
   if (method == HTTPMethod::OPTIONS || method == HTTPMethod::POST ||
-      method == HTTPMethod::PUT || method == HTTPMethod::CONNECT) {
+      method == HTTPMethod::PUT) {
     return BodyAllowed::DEFINED;
   }
   return BodyAllowed::NOT_DEFINED;

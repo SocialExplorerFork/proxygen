@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -16,9 +16,10 @@
 #include <proxygen/lib/http/codec/HTTPSettings.h>
 #include <proxygen/lib/utils/Result.h>
 
-#include <proxygen/lib/http/codec/compress/experimental/hpack9/HPACKCodec.h>
+#include <proxygen/lib/http/codec/compress/HPACKCodec.h>
 
 #include <bitset>
+#include <set>
 
 namespace proxygen {
 
@@ -28,9 +29,9 @@ namespace proxygen {
  */
 class HTTP2Codec: public HTTPParallelCodec, HeaderCodec::StreamingCallback {
 public:
-  void onHeader(const std::string& name,
-                const std::string& value) override;
-  void onHeadersComplete() override;
+  void onHeader(const folly::fbstring& name,
+                const folly::fbstring& value) override;
+  void onHeadersComplete(HTTPHeaderSize decodedSize) override;
   void onDecodeError(HeaderDecodeError decodeError) override;
 
   explicit HTTP2Codec(TransportDirection direction);
@@ -41,18 +42,34 @@ public:
     return CodecProtocol::HTTP_2;
   }
 
+  const std::string& getUserAgent() const override {
+    return userAgent_;
+  }
+
   size_t onIngress(const folly::IOBuf& buf) override;
+  bool onIngressUpgradeMessage(const HTTPMessage& msg) override;
   size_t generateConnectionPreface(folly::IOBufQueue& writeBuf) override;
   void generateHeader(folly::IOBufQueue& writeBuf,
                       StreamID stream,
                       const HTTPMessage& msg,
-                      StreamID assocStream = 0,
                       bool eom = false,
                       HTTPHeaderSize* size = nullptr) override;
+  void generatePushPromise(folly::IOBufQueue& writeBuf,
+                           StreamID stream,
+                           const HTTPMessage& msg,
+                           StreamID assocStream,
+                           bool eom = false,
+                           HTTPHeaderSize* size = nullptr) override;
+  void generateExHeader(folly::IOBufQueue& writeBuf,
+                        StreamID stream,
+                        const HTTPMessage& msg,
+                        StreamID controlStream,
+                        bool eom = false,
+                        HTTPHeaderSize* size = nullptr) override;
   size_t generateBody(folly::IOBufQueue& writeBuf,
                       StreamID stream,
                       std::unique_ptr<folly::IOBuf> chain,
-                      boost::optional<uint8_t> padding,
+                      folly::Optional<uint8_t> padding,
                       bool eom) override;
   size_t generateChunkHeader(folly::IOBufQueue& writeBuf,
                              StreamID stream,
@@ -98,16 +115,37 @@ public:
       (transportDirection_ == TransportDirection::UPSTREAM &&
        egressSettings_.getSetting(SettingsId::ENABLE_PUSH, 1));
   }
-  void setHeaderCodecStats(HeaderCodec::Stats* stats) override {
-    headerCodec_.setStats(stats);
+  bool peerHasWebsockets() const {
+    return ingressSettings_.getSetting(SettingsId::ENABLE_CONNECT_PROTOCOL);
   }
+  bool supportsExTransactions() const override {
+    return ingressSettings_.getSetting(SettingsId::ENABLE_EX_HEADERS, 0) &&
+      egressSettings_.getSetting(SettingsId::ENABLE_EX_HEADERS, 0);
+  }
+  void setHeaderCodecStats(HeaderCodec::Stats* hcStats) override {
+    headerCodec_.setStats(hcStats);
+  }
+
+  bool isRequest(StreamID id) const {
+    return ((transportDirection_ == TransportDirection::DOWNSTREAM &&
+             (id & 0x1) == 1) ||
+            (transportDirection_ == TransportDirection::UPSTREAM &&
+             (id & 0x1) == 0));
+  }
+
   size_t addPriorityNodes(
       PriorityQueue& queue,
       folly::IOBufQueue& writeBuf,
       uint8_t maxLevel) override;
   HTTPCodec::StreamID mapPriorityToDependency(uint8_t priority) const override;
 
+  HPACKTableInfo getHPACKTableInfo() const override {
+    return headerCodec_.getHPACKTableInfo();
+  }
+
   //HTTP2Codec specific API
+
+  static void requestUpgrade(HTTPMessage& request);
 
 #ifndef NDEBUG
   uint64_t getReceivedFrameCount() const {
@@ -115,11 +153,28 @@ public:
   }
 #endif
 
-  static void setHeaderSplitSize(uint32_t splitSize) {
-    kHeaderSplitSize = splitSize;
+  // Whether turn on the optimization to reuse IOBuf headroom when write DATA
+  // frame. For other frames, it's always ON.
+  void setReuseIOBufHeadroomForData(bool enabled) {
+    reuseIOBufHeadroomForData_ = enabled;
+  }
+
+  void setHeaderIndexingStrategy(const HeaderIndexingStrategy* indexingStrat) {
+    headerCodec_.setHeaderIndexingStrategy(indexingStrat);
+  }
+  const HeaderIndexingStrategy* getHeaderIndexingStrategy() const {
+    return headerCodec_.getHeaderIndexingStrategy();
   }
 
  private:
+  void generateHeaderImpl(folly::IOBufQueue& writeBuf,
+                          StreamID stream,
+                          const HTTPMessage& msg,
+                          folly::Optional<StreamID> assocStream,
+                          folly::Optional<StreamID> controlStream,
+                          bool eom,
+                          HTTPHeaderSize* size);
+
   class HeaderDecodeInfo {
    public:
     explicit HeaderDecodeInfo(HTTPRequestVerifier v)
@@ -130,6 +185,7 @@ public:
       isRequest = isRequestIn;
       hasStatus = false;
       hasContentLength = false;
+      contentLength = 0;
       regularHeaderSeen = false;
       parsingError = "";
       decodeError = HeaderDecodeError::NONE;
@@ -148,6 +204,7 @@ public:
     bool hasStatus{false};
     bool regularHeaderSeen{false};
     bool hasContentLength{false};
+    uint32_t contentLength{0};
     std::string parsingError;
     HeaderDecodeError decodeError{HeaderDecodeError::NONE};
   };
@@ -159,6 +216,7 @@ public:
     size_t bufLen,
     size_t& parsed);
   ErrorCode parseHeaders(folly::io::Cursor& cursor);
+  ErrorCode parseExHeaders(folly::io::Cursor& cursor);
   ErrorCode parsePriority(folly::io::Cursor& cursor);
   ErrorCode parseRstStream(folly::io::Cursor& cursor);
   ErrorCode parseSettings(folly::io::Cursor& cursor);
@@ -170,13 +228,15 @@ public:
   ErrorCode parseHeadersImpl(
     folly::io::Cursor& cursor,
     std::unique_ptr<folly::IOBuf> headerBuf,
-    boost::optional<http2::PriorityUpdate> priority,
-    boost::optional<uint32_t> promisedStream);
+    folly::Optional<http2::PriorityUpdate> priority,
+    folly::Optional<uint32_t> promisedStream,
+    folly::Optional<uint32_t> controlStream);
 
   ErrorCode handleEndStream();
   ErrorCode checkNewStream(uint32_t stream);
   bool checkConnectionError(ErrorCode, const folly::IOBuf* buf);
-  uint32_t maxSendFrameSize() const {
+  ErrorCode handleSettings(const std::deque<SettingPair>& settings);
+  size_t maxSendFrameSize() const {
     return ingressSettings_.getSetting(SettingsId::MAX_FRAME_SIZE,
                                        http2::kMaxFramePayloadLengthMin);
   }
@@ -186,14 +246,12 @@ public:
   }
   void streamError(const std::string& msg, ErrorCode error, bool newTxn=false);
 
-  HPACKCodec09 headerCodec_;
+  HPACKCodec headerCodec_;
 
   // Current frame state
   http2::FrameHeader curHeader_;
   StreamID expectedContinuationStream_{0};
   bool pendingEndStreamHandling_{false};
-  bool needsChromeWorkaround2_{false}; // rst on 16kb
-  std::set<HTTPCodec::StreamID> expectedChromeResets_;
 
   folly::IOBufQueue curHeaderBlock_{folly::IOBufQueue::cacheChainLength()};
   HTTPSettings ingressSettings_{
@@ -206,9 +264,9 @@ public:
     { SettingsId::ENABLE_PUSH, 0 },
     { SettingsId::MAX_FRAME_SIZE, 16384 },
     { SettingsId::MAX_HEADER_LIST_SIZE, 1 << 17 }, // same as SPDYCodec
+    { SettingsId::ENABLE_CONNECT_PROTOCOL, 0},
   };
 #ifndef NDEBUG
-  uint32_t egressGoawayAck_{std::numeric_limits<uint32_t>::max()};
   uint64_t receivedFrameCount_{0};
 #endif
   enum FrameState {
@@ -224,9 +282,9 @@ public:
   size_t pendingDataFrameBytes_{0};
   size_t pendingDataFramePaddingBytes_{0};
 
-  static uint32_t kHeaderSplitSize;
   HeaderDecodeInfo decodeInfo_;
   std::vector<StreamID> virtualPriorityNodes_;
+  bool reuseIOBufHeadroomForData_{true};
 };
 
 } // proxygen

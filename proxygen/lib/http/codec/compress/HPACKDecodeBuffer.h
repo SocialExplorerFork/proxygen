@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -10,6 +10,7 @@
 #pragma once
 
 #include <folly/Conv.h>
+#include <folly/FBString.h>
 #include <folly/io/Cursor.h>
 #include <folly/io/IOBuf.h>
 #include <proxygen/lib/http/codec/compress/HPACKConstants.h>
@@ -20,12 +21,10 @@ namespace proxygen {
 class HPACKDecodeBuffer {
  public:
 
-  explicit HPACKDecodeBuffer(const huffman::HuffTree& huffmanTree,
-                             folly::io::Cursor& cursorVal,
+  explicit HPACKDecodeBuffer(folly::io::Cursor& cursorVal,
                              uint32_t totalBytes,
                              uint32_t maxLiteralSize)
-      : huffmanTree_(huffmanTree),
-        cursor_(cursorVal),
+      : cursor_(cursorVal),
         totalBytes_(totalBytes),
         remainingBytes_(totalBytes),
         maxLiteralSize_(maxLiteralSize) {}
@@ -68,18 +67,24 @@ class HPACKDecodeBuffer {
   uint8_t peek();
 
   /**
-   * decode an integer from the current position, given a nbit prefix
-   * that basically needs to be ignored
+   * decode an integer from the current position, given a nbit prefix.
+   * Ignores 8 - nbit bits in the first byte of the buffer.
    */
   HPACK::DecodeError decodeInteger(uint8_t nbit, uint32_t& integer);
 
   /**
+   * As above but with no prefix
+   */
+  HPACK::DecodeError decodeInteger(uint32_t& integer);
+
+  /**
    * decode a literal starting from the current position
    */
-  HPACK::DecodeError decodeLiteral(std::string& literal);
+  HPACK::DecodeError decodeLiteral(folly::fbstring& literal);
+
+  HPACK::DecodeError decodeLiteral(uint8_t nbit, folly::fbstring& literal);
 
 private:
-  const huffman::HuffTree& huffmanTree_;
   folly::io::Cursor& cursor_;
   uint32_t totalBytes_;
   uint32_t remainingBytes_;

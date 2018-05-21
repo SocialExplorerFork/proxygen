@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -36,6 +36,7 @@ class Filter : public RequestHandler, public ResponseHandler {
   void setResponseHandler(ResponseHandler* handler) noexcept override {
     // Save downstream handler and pass ourselves as downstream handler
     downstream_ = handler;
+    txn_ = handler->getTransaction();
     upstream_->setResponseHandler(this);
   }
 

@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -23,6 +23,7 @@ class ByteEvent {
     LAST_BYTE,
     PING_REPLY_SENT,
     FIRST_HEADER_BYTE,
+    TRACKED_BYTE,
   };
 
   ByteEvent(uint64_t byteOffset, EventType eventType)
@@ -44,15 +45,19 @@ class TransactionByteEvent : public ByteEvent {
   TransactionByteEvent(uint64_t byteNo,
                        EventType eventType,
                        HTTPTransaction* txn)
-      : ByteEvent(byteNo, eventType), txn_(txn),
-        g_(HTTPTransaction::DestructorGuard(txn)) {}
+      : ByteEvent(byteNo, eventType), txn_(txn) {
+    txn_->incrementPendingByteEvents();
+  }
+
+  ~TransactionByteEvent() {
+    txn_->decrementPendingByteEvents();
+  }
 
   HTTPTransaction* getTransaction() override {
     return txn_;
   }
 
   HTTPTransaction* txn_;
-  HTTPTransaction::DestructorGuard g_; // refcounted transaction
 };
 
 class AckTimeout

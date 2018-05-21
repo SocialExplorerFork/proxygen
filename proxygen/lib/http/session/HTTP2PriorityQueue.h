@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2016, Facebook, Inc.
+ *  Copyright (c) 2015-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -9,48 +9,88 @@
  */
 #pragma once
 
-#include <proxygen/lib/http/codec/HTTPCodec.h>
-#include <proxygen/lib/http/codec/HTTP2Framer.h>
 #include <folly/IntrusiveList.h>
 #include <folly/io/async/HHWheelTimer.h>
+#include <proxygen/lib/http/codec/HTTP2Framer.h>
+#include <proxygen/lib/http/codec/HTTPCodec.h>
 #include <proxygen/lib/utils/WheelTimerInstance.h>
 
 #include <list>
 #include <deque>
+#include <boost/intrusive/unordered_set.hpp>
 
 namespace proxygen {
 
 class HTTPTransaction;
 
-class HTTP2PriorityQueue : public HTTPCodec::PriorityQueue {
+
+class HTTP2PriorityQueueBase : public HTTPCodec::PriorityQueue {
+ public:
+  class BaseNode {
+   public:
+    virtual ~BaseNode() {}
+    virtual bool isEnqueued() const = 0;
+    virtual uint64_t calculateDepth(bool includeVirtual = true) const = 0;
+  };
+
+  using Handle = BaseNode*;
+
+  virtual Handle addTransaction(HTTPCodec::StreamID id,
+                                http2::PriorityUpdate pri,
+                                HTTPTransaction *txn, bool permanent = false,
+                                uint64_t* depth = nullptr) = 0;
+
+  // update the priority of an existing node
+  virtual Handle updatePriority(
+    Handle handle,
+    http2::PriorityUpdate pri,
+    uint64_t* depth = nullptr) = 0;
+
+  // Remove the transaction from the priority tree
+  virtual void removeTransaction(Handle handle) = 0;
+
+  // Notify the queue when a transaction has egress
+  virtual void signalPendingEgress(Handle h) = 0;
+
+  // Notify the queue when a transaction no longer has egress
+  virtual void clearPendingEgress(Handle h) = 0;
+};
+
+class HTTP2PriorityQueue : public HTTP2PriorityQueueBase {
 
  private:
   class Node;
+  using NodeMap = boost::intrusive::unordered_set<
+    Node, boost::intrusive::constant_time_size<false>>;
+
+  static const size_t kNumBuckets = 100;
 
  public:
 
-  typedef Node* Handle;
-
- public:
-
-  HTTP2PriorityQueue() {
+  HTTP2PriorityQueue()
+      : nodes_(NodeMap::bucket_traits(nodeBuckets_, kNumBuckets)) {
     root_.setPermanent();
   }
 
   explicit HTTP2PriorityQueue(const WheelTimerInstance& timeout)
-    : timeout_(timeout) {
+      : nodes_(NodeMap::bucket_traits(nodeBuckets_, kNumBuckets)),
+        timeout_(timeout) {
     root_.setPermanent();
   }
+
+  void attachThreadLocals(const WheelTimerInstance& timeout);
+
+  void detachThreadLocals();
 
   void setMaxVirtualNodes(uint32_t maxVirtualNodes) {
     maxVirtualNodes_ = maxVirtualNodes;
   }
 
   // Notify the queue when a transaction has egress
-  void signalPendingEgress(Handle h);
+  void signalPendingEgress(Handle h) override;
 
   // Notify the queue when a transaction no longer has egress
-  void clearPendingEgress(Handle h);
+  void clearPendingEgress(Handle h) override;
 
   void addPriorityNode(HTTPCodec::StreamID id,
                        HTTPCodec::StreamID parent) override{
@@ -67,16 +107,16 @@ class HTTP2PriorityQueue : public HTTPCodec::PriorityQueue {
   // adds new transaction (possibly nullptr) to the priority tree
   Handle addTransaction(HTTPCodec::StreamID id, http2::PriorityUpdate pri,
                         HTTPTransaction *txn, bool permanent = false,
-                        uint64_t* depth = nullptr);
+                        uint64_t* depth = nullptr) override;
 
   // update the priority of an existing node
   Handle updatePriority(
       Handle handle,
       http2::PriorityUpdate pri,
-      uint64_t* depth = nullptr);
+      uint64_t* depth = nullptr) override;
 
   // Remove the transaction from the priority tree
-  void removeTransaction(Handle handle);
+  void removeTransaction(Handle handle) override;
 
   // Returns true if there are no transaction with pending egress
   bool empty() const {
@@ -86,6 +126,10 @@ class HTTP2PriorityQueue : public HTTPCodec::PriorityQueue {
   // The number with pending egress
   uint64_t numPendingEgress() const {
     return activeCount_;
+  }
+
+  uint64_t numVirtualNodes() const {
+    return numVirtualNodes_;
   }
 
   void iterate(const std::function<bool(HTTPCodec::StreamID,
@@ -101,7 +145,7 @@ class HTTP2PriorityQueue : public HTTPCodec::PriorityQueue {
                                            HTTPTransaction *, double)>& fn,
                   const std::function<bool()>& stopFn, bool all);
 
-  typedef std::vector<std::pair<HTTPTransaction*, double>> NextEgressResult;
+  using NextEgressResult = std::vector<std::pair<HTTPTransaction*, double>>;
 
   void nextEgress(NextEgressResult& result, bool spdyMode = false);
 
@@ -109,15 +153,23 @@ class HTTP2PriorityQueue : public HTTPCodec::PriorityQueue {
     kNodeLifetime_ = lifetime;
   }
 
+  /// Error handling code
+  // Rebuilds tree by making all non-root nodes direct children of the root and
+  // weight reset to the default 16
+  void rebuildTree();
+  uint32_t getRebuildCount() const { return rebuildCount_; }
+  bool isRebuilt() const { return rebuildCount_ > 0; }
+
+
  private:
   // Find the node in priority tree
-  Handle find(HTTPCodec::StreamID id, uint64_t* depth = nullptr);
+  Node* find(HTTPCodec::StreamID id, uint64_t* depth = nullptr);
 
-  Handle findInternal(HTTPCodec::StreamID id) {
+  Node* findInternal(HTTPCodec::StreamID id) {
     if (id == 0) {
       return &root_;
     }
-    return root_.findInTree(id, nullptr);
+    return find(id);
   }
 
   bool allowDanglingNodes() const {
@@ -139,12 +191,44 @@ class HTTP2PriorityQueue : public HTTPCodec::PriorityQueue {
   void updateEnqueuedWeight();
 
  private:
-  class Node : public folly::HHWheelTimer::Callback {
+  typedef boost::intrusive::link_mode<boost::intrusive::auto_unlink> link_mode;
+
+  class Node : public BaseNode,
+               public folly::HHWheelTimer::Callback,
+               public boost::intrusive::unordered_set_base_hook<link_mode> {
    public:
+
+    static const uint16_t kDefaultWeight = 16;
+
     Node(HTTP2PriorityQueue& queue, Node* inParent, HTTPCodec::StreamID id,
          uint8_t weight, HTTPTransaction *txn);
 
-    ~Node();
+    ~Node() override;
+
+    // Functor comparing id to node and vice-versa
+    struct IdNodeEqual {
+      bool operator()(const HTTPCodec::StreamID& id, const Node& node) {
+        return id == node.id_;
+      }
+      bool operator()(const Node& node, const HTTPCodec::StreamID& id) {
+        return node.id_ == id;
+      }
+    };
+
+    // Hash function
+    struct IdHash {
+      size_t operator()(const HTTPCodec::StreamID& id) const {
+        return boost::hash<HTTPCodec::StreamID>()(id);
+      }
+    };
+
+    // Equality and hash operators (for intrusive set)
+    friend bool operator==(const Node& lhs, const Node& rhs) {
+      return lhs.id_ == rhs.id_;
+    }
+    friend std::size_t hash_value(const Node& node) {
+      return IdHash()(node.id_);
+    }
 
     void setPermanent() {
       isPermanent_ = true;
@@ -174,7 +258,7 @@ class HTTP2PriorityQueue : public HTTPCodec::PriorityQueue {
     }
 
     // Add a new node as a child of this node
-    Handle emplaceNode(std::unique_ptr<Node> node, bool exclusive);
+    Node* emplaceNode(std::unique_ptr<Node> node, bool exclusive);
 
     // Removes the node from the tree
     void removeFromTree();
@@ -183,16 +267,20 @@ class HTTP2PriorityQueue : public HTTPCodec::PriorityQueue {
 
     void clearPendingEgress();
 
+    uint16_t getWeight() const {
+      return weight_;
+    }
+
     // Set a new weight for this node
     void updateWeight(uint8_t weight);
 
-    Handle reparent(Node* newParent, bool exclusive);
+    Node* reparent(Node* newParent, bool exclusive);
 
     // Returns true if this is a descendant of node
     bool isDescendantOf(Node *node) const;
 
     // True if this Node is in the egress queue
-    bool isEnqueued() const {
+    bool isEnqueued() const override {
       return (txn_ != nullptr && enqueued_);
     }
 
@@ -202,15 +290,12 @@ class HTTP2PriorityQueue : public HTTPCodec::PriorityQueue {
       return isEnqueued() || totalEnqueuedWeight_ > 0;
     }
 
-    // Find the node for the given stream ID in the priority tree
-    Node* findInTree(HTTPCodec::StreamID id, uint64_t* depth);
-
     double getRelativeWeight() const {
       if (!parent_) {
         return 1.0;
       }
 
-      return (double)weight_ / parent_->totalChildWeight_;
+      return static_cast<double>(weight_) / parent_->totalChildWeight_;
     }
 
     double getRelativeEnqueuedWeight() const {
@@ -218,7 +303,11 @@ class HTTP2PriorityQueue : public HTTPCodec::PriorityQueue {
         return 1.0;
       }
 
-      return (double)weight_ / parent_->totalEnqueuedWeight_;
+      if (parent_->totalEnqueuedWeight_ == 0) {
+        return 0.0;
+      }
+
+      return static_cast<double>(weight_) / parent_->totalEnqueuedWeight_;
     }
 
     /* Execute the given function on this node and all child nodes presently
@@ -244,7 +333,7 @@ class HTTP2PriorityQueue : public HTTPCodec::PriorityQueue {
           id(i), node(n), ratio(r) {}
     };
 
-    typedef std::deque<PendingNode> PendingList;
+    using PendingList = std::deque<PendingNode>;
     bool visitBFS(double relativeParentWeight,
                   const std::function<bool(HTTP2PriorityQueue& queue,
                                            HTTPCodec::StreamID,
@@ -258,8 +347,16 @@ class HTTP2PriorityQueue : public HTTPCodec::PriorityQueue {
 
     void convertVirtualNode(HTTPTransaction* txn);
 
+    uint64_t calculateDepth(bool includeVirtual = true) const override;
+
+    // Internal error recovery
+    void flattenSubtree();
+    void flattenSubtreeDFS(Node* subtreeRoot);
+    static void addChildToNewSubtreeRoot(std::unique_ptr<Node> child,
+                                         Node* subtreeRoot);
+
    private:
-    Handle addChild(std::unique_ptr<Node> child);
+    Node* addChild(std::unique_ptr<Node> child);
 
     void addChildren(std::list<std::unique_ptr<Node>>&& children);
 
@@ -288,7 +385,7 @@ class HTTP2PriorityQueue : public HTTPCodec::PriorityQueue {
     HTTP2PriorityQueue& queue_;
     Node *parent_{nullptr};
     HTTPCodec::StreamID id_{0};
-    uint16_t weight_{16};
+    uint16_t weight_{kDefaultWeight};
     HTTPTransaction *txn_{nullptr};
     bool isPermanent_{false};
     bool enqueued_{false};
@@ -299,13 +396,20 @@ class HTTP2PriorityQueue : public HTTPCodec::PriorityQueue {
     uint64_t totalChildWeight_{0};
     std::list<std::unique_ptr<Node>> children_;
     std::list<std::unique_ptr<Node>>::iterator self_;
+    // enqueuedChildren_ includes all children that are themselves enqueued_
+    // or have enqueued descendants. Therefore, enqueuedChildren_ may contain
+    // direct children that have enqueued_ == false
     folly::IntrusiveListHook enqueuedHook_;
     folly::IntrusiveList<Node, &Node::enqueuedHook_> enqueuedChildren_;
   };
 
+  typename NodeMap::bucket_type nodeBuckets_[kNumBuckets];
+  NodeMap nodes_;
   Node root_{*this, nullptr, 0, 1, nullptr};
+  uint32_t rebuildCount_{0};
+  static uint32_t kMaxRebuilds_;
   uint64_t activeCount_{0};
-  uint32_t maxVirtualNodes_{200};
+  uint32_t maxVirtualNodes_{50};
   uint32_t numVirtualNodes_{0};
   bool pendingWeightChange_{false};
   WheelTimerInstance timeout_;
